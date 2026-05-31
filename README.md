@@ -28,6 +28,32 @@ Runs conversion preparation. In this first effort, it reads one `.enex` export f
 
 Reserved for report-only runs. It is accepted by the command line but is not implemented in this first effort.
 
+`--notion-bootstrap`
+
+Creates the Notion migration pages. If `--notion-root` is provided, the
+integration must have access to a Notion page with that exact title, and the
+migration pages are created under it. If no root is provided, the tool creates
+or reuses top-level workspace pages.
+
+`--notion-databases`
+
+Creates or reuses the Notion databases needed for import. Each `.enex` source
+gets one database named after the `.enex` file stem inside `Evernote Import`.
+The exception database is named `Import-Exceptions` inside
+`Evernote Import Exceptions`.
+
+`--notion-import`
+
+Imports extracted notes into each source import database using queue state in
+`state.db`. Operations are durable and restart-safe.
+
+`--resolve-evernote-links`
+
+Post-import resolver for embedded Evernote links. It reads `exceptions.txt`,
+uses each `Evernote Link` row's link text to find an identically named Notion
+page, and replaces the warning placeholder block with an inline link when a
+single exact match is found.
+
 `-e`, `--enex-source`
 
 Path to the Evernote export file. Example:
@@ -44,13 +70,41 @@ Directory where processing output is created. The tool creates a child directory
 <processing-directory>/Enduring
 ```
 
+`-w`, `--workers`
+
+Number of `.enex` files to process in parallel when `--enex-source` points at a
+directory. The default is `1`.
+
+`--exceptions-file`
+
+Path to an `exceptions.txt` file used by `--resolve-evernote-links`.
+
 `-k`, `--notion-key`
 
-Notion integration key. Accepted now so scripts can use the final parameter shape, but it is not used until Notion upload code is added.
+Notion integration key. Required for Notion API modes (including
+`--notion-bootstrap`, `--notion-databases`, `--notion-import`, and
+`--wipe-remote`) unless `NOTION_KEY` or `NOTION_TOKEN` is set in the
+environment.
 
 `-n`, `--notion-root`
 
-Notion root page for `enex-converted` and `enex-exceptions`. Accepted now so scripts can use the final parameter shape, but it is not used until Notion upload code is added.
+Notion root page for `Evernote Import` and `Evernote Import Exceptions`.
+
+`--resume`
+
+Resume a run that already has committed operations.
+
+`--reset-run`
+
+Reset one run id back to pending operations.
+
+`--wipe-local`
+
+Delete local processing output for one run id.
+
+`--wipe-remote`
+
+Archive mapped Notion pages for one run id and clear local mappings.
 
 ## First-pass output
 
@@ -68,13 +122,72 @@ processing/
     notes/
       note_000001.enex
       note_000002.enex
+    state.db
     master.txt
     success.txt
     errors.txt
+    exceptions.txt
 ```
 
-`master.txt` contains one line per note with the note id, title, and extracted note file path. `success.txt` records notes extracted successfully. `errors.txt` records notes that could not be extracted.
+`master.txt` contains one line per note with the note id, title, extracted note file path, tags, and exception reasons. `success.txt` records notes extracted successfully. `errors.txt` records notes that could not be extracted. `exceptions.txt` seeds future exception database rows for notes such as `Empty Title`, `No Content`, and `Evernote Link`.
+
+`state.db` stores durable local run and note state in SQLite for restart-safe
+execution and resumable import operations.
+
+Empty or whitespace-only note titles are imported as `Empty Title`. Evernote tags are preserved for the future Notion `Tags` multi-select property.
+
+Embedded `evernote://` links are recorded separately because they cannot be
+resolved until the entire collection has been imported. Each link keeps its
+visible link text and original Evernote link value for later manual confirmation.
+
+During conversion, non-text content embedded inside a text block is split into
+separate planned blocks. Text above and below embedded links, resources, and
+documents remains in separate text segments. Large text segments are also split
+into smaller chunks before Notion block creation.
 
 The command prints the total note count read from the `.enex` file.
 
 `-e` can also point at a directory. In that case, every direct child `*.enex` file is processed in sorted order, with one child output directory per source file.
+
+## Notion bootstrap
+
+To create or reuse the migration pages:
+
+```bash
+NOTION_KEY="secret_from_notion" e2n --notion-bootstrap -n "Migration Root"
+```
+
+This creates these child pages under the root:
+
+```text
+Migration Root/
+  Evernote Import/
+  Evernote Import Exceptions/
+```
+
+The exception page will contain the internal exception tracking database named
+`Import-Exceptions`.
+
+## Notion databases
+
+To create or reuse the databases:
+
+```bash
+NOTION_KEY="secret_from_notion" e2n --notion-databases -n "ENEX-IMPORT" -e ~/Downloads/Imports/Notebooks
+```
+
+Database creation is idempotent. On restart, the tool searches for an exact
+database name under the expected parent page and reuses it. It does not create a
+second database of the same name under the same parent.
+
+## Evernote link resolver
+
+After all notes are imported and warning placeholder blocks have Notion block
+links in `exceptions.txt`, run:
+
+```bash
+NOTION_KEY="secret_from_notion" e2n --resolve-evernote-links --exceptions-file ./processing/Enduring/exceptions.txt
+```
+
+Rows without a single exact Notion title match are left for manual review. The
+original Evernote link value remains in the linkable-text field.

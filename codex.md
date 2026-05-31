@@ -26,31 +26,51 @@ Evernote `.enex` to Notion migration tool. Converts Evernote notebooks into Noti
 - Treat every operation as repeatable and externally configured. Do not retain tenant, notebook, source, Notion, or run context in process globals or hidden application state.
 - Keep single-file and once-off workflows as thin entry points over reusable services. The same services must support one `.enex` file, every `.enex` file in a source directory, restart runs, and future scheduling.
 - Process multiple `.enex` files in deterministic sequence unless an explicit concurrency strategy is introduced. Future concurrency must isolate run context per notebook/file so multi-threaded or multi-tenant execution cannot share mutable state accidentally.
+- The CLI may process multiple `.enex` files in parallel with `--workers`; each file writes to its own processing child directory and must not share mutable run state with another file.
 - Use streaming parsers and incremental checkpoint writes for large exports. Avoid designs that require loading full notebooks, all note bodies, or all resources into memory.
 - Use the processing directory as the durable handoff location for extracted notes, resources, checkpoints, reports, and retry state.
 - Extracted resources from ENEX notes will be materialized under the same destination tree and later uploaded or linked into Notion pages/database rows.
 - Exception records must preserve manual recovery paths. When a resource cannot be inserted automatically, the exception database should include a download link or durable local/exported resource reference so the item can be manually inserted into the correct imported note.
+- Unsupported Evernote attributes must be handled explicitly. If the Notion SDK/API cannot currently expose or set the matching Notion page/database-row attribute, record the gap as a future feature objective, add a visible marker block on the affected Notion page/row, and create an exception database row linked to that marker block with the manual correction message and any external resource references.
 
 ## Notion Structure
 
-### enex-converted Page
+### Evernote Import Page
 
-All successfully converted ENEX notes land under a top-level Notion page named **"enex-converted"**.
+All successfully converted ENEX notes land under a top-level Notion page named **"Evernote Import"**.
 
-- Each `.enex` file produces a **Notion database** inside "enex-converted", named after the source file. For example, importing `Enduring.enex` creates a database called **"Enduring"**.
+- Each `.enex` file produces a **Notion database** inside "Evernote Import", named after the source file. For example, importing `Enduring.enex` creates a database called **"Enduring"**.
+- Import database creation must be idempotent. On restart, exact database names under the expected parent page are reused. The tool must never create a second database of the same name under the same page.
 - Every ENEX note becomes a **row** in its corresponding database.
+- If an Evernote note title is empty or whitespace-only, the Notion row title is **"Empty Title"**.
+- Each import database includes a **Tags** multi-select property. Every Evernote `<tag>` value from the note is included in that property.
 - Note content is added as **child blocks** of the database row (page), mapping ENML elements to Notion block types (paragraph, heading, to_do, image, pdf, etc.).
+- Text conversion must first split oversized text into smaller Notion-safe chunks.
+- Links, embedded resources, documents, and other non-text content that appear inside a text block must be split out as standalone planned blocks, preserving the text above and below them as separate text blocks.
 - Binary resources (PDFs, images) are decoded from base64, uploaded via the Notion File Upload API, and attached as the appropriate block type.
 
 ### Exception Tracking
 
-- A top-level Notion page named **"enex-exceptions"** contains a single **exception tracking database**.
+- A top-level Notion page named **"Evernote Import Exceptions"** contains a single exception tracking database named **"Import-Exceptions"**.
+- Exception database creation must be idempotent. There is exactly one **"Import-Exceptions"** database under **"Evernote Import Exceptions"**.
 - If a note cannot be fully converted to its matched Notion format, a **basic Notion page** is still created (title + raw text fallback) so that no note is ever lost.
-- The failed note is also recorded as a row in the exception tracking database with these properties:
+- Failed notes and unsupported attributes are recorded as rows in the exception tracking database with these properties:
   - **Note Name** (title)
-  - **Link** (url — link to the basic fallback page that was created)
-  - **Error Message** (rich_text — the exception or conversion failure reason)
+  - **Link** (url — link to the fallback page or the marker block on the affected page/row)
+  - **Reason** (multi-select — one or more values, such as "Empty Title" and "No Content")
+  - **Error Message** (rich_text — the exception, conversion failure reason, or manual correction message)
   - **Source File** (rich_text — the `.enex` filename it came from)
+  - **Linkable Text** (rich_text — populated with the original Evernote link value for embedded Evernote links)
+  - **Evernote Attribute** (rich_text — populated for unsupported attribute gaps)
+  - **Notion Target** (rich_text — intended page property, database property, or block target)
+  - **External Resource** (rich_text or url — local/exported path or durable reference needed for manual correction)
+- Notes with empty titles are imported as **"Empty Title"** and recorded in the exception database with **Reason = Empty Title**.
+- Notes with no content and no resources, ignoring tags, are recorded in the exception database with **Reason = No Content**.
+- Notes that have content but fail conversion because part of that content is unsupported are recorded with **Reason = Unsupported Content**. This is distinct from **No Content**.
+- Unsupported-content failures must add a visible error/comment block to the affected Notion page or row and create an exception database row linked to that block.
+- Embedded Evernote links are recorded with **Reason = Evernote Link**. They must be retained as their own warning callout block with the original visible link name, and the exception database row must link to that block and preserve the original Evernote link value in **Linkable Text**.
+- The post-import Evernote link resolver is a separate application mode. It reads exception records, searches for an exact Notion page/database-row title match using the link text, replaces the warning placeholder with an inline Notion link when there is exactly one match, and leaves drift/custom-link cases for manual resolution.
+- When a note has multiple issues, **Reason** contains all applicable values.
 
 ### Zero-Loss Guarantee
 

@@ -36,6 +36,26 @@ Extract records from the `.enex` file. This is the only working mode in the firs
 
 Accepted by the command line, but not implemented yet.
 
+`--resolve-evernote-links`
+
+Post-import resolver for embedded Evernote links. It reads `exceptions.txt`,
+uses each `Evernote Link` row's visible link text to search for an identically
+named Notion page/database row, and updates the warning placeholder block when a
+single exact match is found.
+
+`--notion-databases`
+
+Creates or reuses the Notion databases needed for import. Each `.enex` source
+gets one database named after the `.enex` file stem inside `Evernote Import`.
+The exception database is named `Import-Exceptions` inside
+`Evernote Import Exceptions`.
+
+`--notion-import`
+
+Imports extracted notes into each source database under `Evernote Import` using
+durable local queue state in `state.db`. Operations are rate-limited to respect
+Notion limits and can be resumed safely.
+
 `-e`, `--enex-source`
 
 The `.enex` file to read, or a directory containing `.enex` files. When a directory is provided, every direct child `*.enex` file is processed in sorted order.
@@ -64,13 +84,41 @@ With `Enduring.enex`, the output directory becomes:
 
 The same destination tree will later hold extracted resources from the notes, such as files that need to be uploaded or manually inserted into Notion.
 
+`-w`, `--workers`
+
+Number of `.enex` files to process in parallel when `--enex-source` points at a
+directory. Use `1` for deterministic single-file-at-a-time processing.
+
+`--exceptions-file`
+
+Path to an `exceptions.txt` file used by `--resolve-evernote-links`.
+
 `-k`, `--notion-key`
 
-The Notion integration key. This parameter is accepted now but is not used until Notion upload is added.
+The Notion integration key. Required for Notion API modes, including
+`--notion-bootstrap`, `--notion-databases`, `--notion-import`, and
+`--wipe-remote`.
 
 `-n`, `--notion-root`
 
-The Notion root page where `enex-converted` and `enex-exceptions` will be managed. This parameter is accepted now but is not used until Notion upload is added.
+The Notion parent page where `Evernote Import` and `Evernote Import Exceptions` will be managed. If omitted, the tool creates or reuses those pages as top-level workspace pages when the integration type allows it.
+
+`--resume`
+
+Continue processing a run that already has committed operations.
+
+`--reset-run`
+
+Run id to reset back to pending operations before import retry.
+
+`--wipe-local`
+
+Run id whose local processing directory should be removed.
+
+`--wipe-remote`
+
+Run id whose mapped Notion pages should be archived and removed from local
+mapping state.
 
 ## Output files
 
@@ -82,6 +130,7 @@ processing/
     notes/
       note_000001.enex
       note_000002.enex
+    state.db
     master.txt
     success.txt
     errors.txt
@@ -89,7 +138,7 @@ processing/
 
 `master.txt`
 
-One line per extracted note. Each line contains the generated note id, note title, and extracted note file path.
+One line per extracted note. Each line contains the generated note id, note title, extracted note file path, comma-separated Evernote tags, and comma-separated exception reasons.
 
 `success.txt`
 
@@ -99,7 +148,26 @@ One line per note that was successfully extracted.
 
 One line per note that failed extraction. An empty file means there were no extraction errors.
 
+`exceptions.txt`
+
+One line per successfully extracted note that already needs a future exception database row. Empty titles are normalized to `Empty Title` and recorded with the `Empty Title` reason. Notes with no content and no resources are recorded with the `No Content` reason. Embedded `evernote://` links are recorded with the `Evernote Link` reason, the visible link text, and the original link value. If multiple note-level reasons apply, all reasons are preserved.
+
+Later conversion may add `Unsupported Content` exception rows for notes that do
+contain data but include content that cannot be imported into supported Notion
+blocks. This is not treated as `No Content`.
+
+Embedded links, resources, and documents may appear inside existing text. During
+conversion planning, the text is split above and below each non-text item so the
+non-text item can become its own Notion block. Large text blocks are split into
+smaller chunks before import to stay within Notion block-size limits.
+
 Future exception reporting will include links or durable references to extracted resources that could not be inserted automatically, so they can be manually placed into the correct imported Notion note.
+
+`state.db`
+
+Durable local run state in SQLite. This file tracks extraction runs, note-level
+status, and resumable operation metadata for restart-safe imports and
+incremental testing.
 
 ## Count
 
