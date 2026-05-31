@@ -26,6 +26,20 @@ When running from a source checkout before installing the package:
 PYTHONPATH=src python -m e2n.cli --converting -e ~/Downloads/Imports/Notebooks/Enduring.enex -d ./processing
 ```
 
+To run the local web interface:
+
+```bash
+e2n-ui --open
+```
+
+If command shims are not refreshed yet, run:
+
+```bash
+PYTHONPATH=src python -m e2n.webui.server --open
+```
+
+By default, it listens on `http://127.0.0.1:8787`.
+
 ## Parameters
 
 `--converting`

@@ -11,6 +11,7 @@ import sys
 from pathlib import Path
 
 from e2n.enex import ExtractionResult, discover_enex_sources, extract_enex_notes
+from e2n.exception_rebuild import RebuildSummary, rebuild_exceptions_for_sources
 from e2n.link_resolver import LinkResolutionResult, resolve_evernote_links
 from e2n.operation_queue import ResumableOperationQueue
 from e2n.notion import (
@@ -36,6 +37,11 @@ def build_parser() -> argparse.ArgumentParser:
     mode.add_argument("--notion-databases", action="store_true", help="Create or reuse Notion import databases.")
     mode.add_argument("--notion-import", action="store_true", help="Upload extracted notes into Notion databases.")
     mode.add_argument("--resolve-evernote-links", action="store_true", help="Resolve Evernote link placeholders.")
+    mode.add_argument(
+        "--rebuild-exceptions",
+        action="store_true",
+        help="Rebuild SQL exception and note-review projections from extraction artifacts.",
+    )
     parser.add_argument("-e", "--enex-source", type=Path, help="Path to a source .enex file or directory of .enex files.")
     parser.add_argument("-d", "--processing-directory", type=Path, help="Directory where processing output is written.")
     parser.add_argument(
@@ -46,6 +52,26 @@ def build_parser() -> argparse.ArgumentParser:
         help="Number of ENEX files to process in parallel when --enex-source is a directory.",
     )
     parser.add_argument("--exceptions-file", type=Path, help="Path to an exceptions.txt file for link resolution.")
+    parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Apply mutations for rebuild operations. Without this flag, rebuild runs in dry-run mode.",
+    )
+    parser.add_argument(
+        "--review-version",
+        default="rebuild-v1",
+        help="Version label written to note review rows during --rebuild-exceptions.",
+    )
+    parser.add_argument(
+        "--from-notion",
+        action="store_true",
+        help="During --rebuild-exceptions, derive exceptions by scanning imported Notion pages/blocks.",
+    )
+    parser.add_argument(
+        "--sync-notion-exceptions",
+        action="store_true",
+        help="During --rebuild-exceptions --apply, sync Import-Exceptions rows in Notion by exception key.",
+    )
     parser.add_argument(
         "-k",
         "--notion-key",
@@ -250,6 +276,52 @@ def run_notion_import(args: argparse.Namespace) -> None:
                 state.close()
 
 
+def run_rebuild_exceptions(args: argparse.Namespace) -> list[RebuildSummary]:
+    """Rebuild exception and note-review projections from extraction artifacts."""
+    if args.enex_source is None:
+        raise ValueError("--rebuild-exceptions requires -e/--enex-source")
+    if args.processing_directory is None:
+        raise ValueError("--rebuild-exceptions requires -d/--processing-directory")
+
+    notion_key = args.notion_key or os.environ.get("NOTION_KEY") or os.environ.get("NOTION_TOKEN")
+    if (args.from_notion or args.sync_notion_exceptions) and not notion_key:
+        raise ValueError(
+            "--from-notion/--sync-notion-exceptions require -k/--notion-key, NOTION_KEY, or NOTION_TOKEN"
+        )
+    if args.sync_notion_exceptions and not args.apply:
+        raise ValueError("--sync-notion-exceptions requires --apply")
+
+    apply = bool(args.apply)
+    summaries = rebuild_exceptions_for_sources(
+        args.enex_source,
+        args.processing_directory,
+        apply=apply,
+        review_version=str(args.review_version),
+        from_notion=bool(args.from_notion),
+        notion_key=notion_key or "",
+        notion_root=args.notion_root,
+        sync_notion_exceptions=bool(args.sync_notion_exceptions),
+    )
+
+    mode = "APPLY" if apply else "DRY-RUN"
+    print(f"Exception rebuild mode: {mode}")
+    for summary in summaries:
+        print(
+            f"Rebuild {summary.source_file} ({summary.run_id}): "
+            f"notes={summary.total_notes} exceptions={summary.total_exceptions} "
+            f"review_passed={summary.review_passed} "
+            f"review_passed_with_open_exceptions={summary.review_passed_with_open_exceptions} "
+            f"review_failed={summary.review_failed}"
+        )
+
+    total_notes = sum(summary.total_notes for summary in summaries)
+    total_exceptions = sum(summary.total_exceptions for summary in summaries)
+    print(f"Rebuild totals: files={len(summaries)} notes={total_notes} exceptions={total_exceptions}")
+    if not apply:
+        print("Dry-run only. Re-run with --apply to write projection tables.")
+    return summaries
+
+
 def _resolve_run_id(state: ProcessingStateStore, args: argparse.Namespace) -> str | None:
     """Resolve the target run id from explicit CLI flags or latest run state."""
     explicit_run_id = args.reset_run or args.wipe_local or args.wipe_remote
@@ -295,6 +367,8 @@ def main(argv: list[str] | None = None) -> int:
             run_notion_import(args)
         elif args.resolve_evernote_links:
             run_resolve_evernote_links(args)
+        elif args.rebuild_exceptions:
+            run_rebuild_exceptions(args)
         else:
             run_converting(args)
     except Exception as exc:

@@ -10,7 +10,15 @@ from e2n.notion import (
     ensure_exception_database,
     ensure_import_database,
     exception_reason_property,
+    file_block,
+    image_block,
     import_tags_property,
+    link_text_span,
+    mime_to_notion_block_type,
+    paragraph_block,
+    pdf_block,
+    plain_text_span,
+    segments_to_notion_blocks,
     unsupported_content_marker_block,
 )
 
@@ -429,3 +437,180 @@ def test_notion_bootstrap_cli_accepts_environment_key(monkeypatch, capsys) -> No
     captured = capsys.readouterr()
     assert exit_code == 0
     assert "Using Notion root page: Root (root)" in captured.out
+
+
+# ---------------------------------------------------------------------------
+# MIME type registry tests (REQ-BLOCK-03, REQ-UNSUPPORTED-01)
+# ---------------------------------------------------------------------------
+
+def test_mime_to_notion_block_type_maps_images() -> None:
+    assert mime_to_notion_block_type("image/png") == "image"
+    assert mime_to_notion_block_type("image/jpeg") == "image"
+    assert mime_to_notion_block_type("IMAGE/GIF") == "image"
+
+
+def test_mime_to_notion_block_type_maps_pdf() -> None:
+    assert mime_to_notion_block_type("application/pdf") == "pdf"
+    assert mime_to_notion_block_type("APPLICATION/PDF") == "pdf"
+
+
+def test_mime_to_notion_block_type_maps_generic_file() -> None:
+    assert mime_to_notion_block_type("application/zip") == "file"
+    assert mime_to_notion_block_type("application/octet-stream") == "file"
+    assert mime_to_notion_block_type("text/plain") == "file"
+    assert mime_to_notion_block_type("") == "file"
+
+
+def test_mime_to_notion_block_type_marks_audio_video_unsupported() -> None:
+    assert mime_to_notion_block_type("audio/mpeg") == "unsupported"
+    assert mime_to_notion_block_type("audio/wav") == "unsupported"
+    assert mime_to_notion_block_type("video/mp4") == "unsupported"
+    assert mime_to_notion_block_type("video/quicktime") == "unsupported"
+
+
+def test_mime_to_notion_block_type_marks_spreadsheet_unsupported() -> None:
+    assert mime_to_notion_block_type("application/vnd.ms-excel") == "unsupported"
+    assert mime_to_notion_block_type("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet") == "unsupported"
+
+
+# ---------------------------------------------------------------------------
+# Block builder tests (REQ-BLOCK-03, REQ-LINK-01)
+# ---------------------------------------------------------------------------
+
+def test_paragraph_block_structure() -> None:
+    spans = [plain_text_span("hello")]
+    assert paragraph_block(spans) == {
+        "object": "block",
+        "type": "paragraph",
+        "paragraph": {"rich_text": [{"type": "text", "text": {"content": "hello"}}]},
+    }
+
+
+def test_link_text_span_carries_url() -> None:
+    span = link_text_span("Click here", "https://example.com")
+    assert span == {"type": "text", "text": {"content": "Click here", "link": {"url": "https://example.com"}}}
+
+
+def test_image_block_structure() -> None:
+    assert image_block("https://cdn.example.com/img.png") == {
+        "object": "block",
+        "type": "image",
+        "image": {"type": "external", "external": {"url": "https://cdn.example.com/img.png"}},
+    }
+
+
+def test_pdf_block_structure() -> None:
+    assert pdf_block("https://cdn.example.com/doc.pdf") == {
+        "object": "block",
+        "type": "pdf",
+        "pdf": {"type": "external", "external": {"url": "https://cdn.example.com/doc.pdf"}},
+    }
+
+
+def test_file_block_with_filename() -> None:
+    block = file_block("https://cdn.example.com/data.csv", filename="data.csv")
+    assert block["type"] == "file"
+    assert block["file"]["external"]["url"] == "https://cdn.example.com/data.csv"
+    assert block["file"]["name"] == "data.csv"
+
+
+def test_file_block_without_filename_omits_name_key() -> None:
+    block = file_block("https://cdn.example.com/data.csv")
+    assert "name" not in block["file"]
+
+
+# ---------------------------------------------------------------------------
+# segments_to_notion_blocks integration tests (REQ-BLOCK-02, REQ-BLOCK-03)
+# ---------------------------------------------------------------------------
+
+def _make_segment(kind: str, text: str, value: str = "", mime_type: str = ""):
+    from e2n.enml import ContentSegment
+    return ContentSegment(kind=kind, text=text, value=value, mime_type=mime_type)  # type: ignore[arg-type]
+
+
+def test_segments_to_notion_blocks_plain_text_becomes_paragraph() -> None:
+    segments = [_make_segment("text", "Hello world")]
+    blocks, exceptions = segments_to_notion_blocks(segments, {})
+    assert len(blocks) == 1
+    assert blocks[0]["type"] == "paragraph"
+    assert blocks[0]["paragraph"]["rich_text"][0]["text"]["content"] == "Hello world"
+    assert exceptions == []
+
+
+def test_segments_to_notion_blocks_http_link_stays_inline_with_text() -> None:
+    segments = [
+        _make_segment("text", "Visit"),
+        _make_segment("http_link", "Example", value="https://example.com"),
+        _make_segment("text", "today"),
+    ]
+    blocks, exceptions = segments_to_notion_blocks(segments, {})
+    # All three inline segments should be merged into one paragraph
+    assert len(blocks) == 1
+    rich_text = blocks[0]["paragraph"]["rich_text"]
+    assert rich_text[0]["text"]["content"] == "Visit"
+    assert rich_text[1]["text"]["link"]["url"] == "https://example.com"
+    assert rich_text[2]["text"]["content"] == "today"
+    assert exceptions == []
+
+
+def test_segments_to_notion_blocks_resource_with_url_becomes_image_block() -> None:
+    segments = [_make_segment("resource", "en-media", value="abc123", mime_type="image/png")]
+    blocks, exceptions = segments_to_notion_blocks(segments, {"abc123": "https://cdn.example.com/img.png"})
+    assert len(blocks) == 1
+    assert blocks[0]["type"] == "image"
+    assert exceptions == []
+
+
+def test_segments_to_notion_blocks_pdf_resource_becomes_pdf_block() -> None:
+    segments = [_make_segment("resource", "en-media", value="pdfhash", mime_type="application/pdf")]
+    blocks, exceptions = segments_to_notion_blocks(segments, {"pdfhash": "https://cdn.example.com/doc.pdf"})
+    assert blocks[0]["type"] == "pdf"
+    assert exceptions == []
+
+
+def test_segments_to_notion_blocks_missing_resource_emits_callout() -> None:
+    segments = [_make_segment("resource", "en-media", value="missinghash", mime_type="image/jpeg")]
+    blocks, exceptions = segments_to_notion_blocks(segments, {}, note_id="n1", note_title="Note")
+    assert blocks[0]["type"] == "callout"
+    assert len(exceptions) == 1
+    assert isinstance(exceptions[0], UnsupportedContentRecord)
+
+
+def test_segments_to_notion_blocks_unsupported_mime_emits_callout() -> None:
+    segments = [_make_segment("resource", "en-media", value="audiohash", mime_type="audio/mpeg")]
+    blocks, exceptions = segments_to_notion_blocks(segments, {"audiohash": "https://example.com/audio.mp3"})
+    assert blocks[0]["type"] == "callout"
+    assert len(exceptions) == 1
+
+
+def test_segments_to_notion_blocks_evernote_link_emits_callout_and_exception() -> None:
+    segments = [_make_segment("evernote_link", "Target Note", value="evernote://view/1/s1/guid/guid/")]
+    blocks, exceptions = segments_to_notion_blocks(segments, {}, note_id="n1", note_title="Source Note")
+    assert blocks[0]["type"] == "callout"
+    assert len(exceptions) == 1
+    assert isinstance(exceptions[0], EvernoteEmbeddedLinkRecord)
+    assert exceptions[0].link_text == "Target Note"
+
+
+def test_segments_to_notion_blocks_table_emits_callout_and_exception() -> None:
+    segments = [_make_segment("table", "table")]
+    blocks, exceptions = segments_to_notion_blocks(segments, {}, note_id="n1", note_title="Note")
+    assert blocks[0]["type"] == "callout"
+    assert len(exceptions) == 1
+    assert isinstance(exceptions[0], UnsupportedContentRecord)
+
+
+def test_segments_to_notion_blocks_mixed_content_preserves_order() -> None:
+    """Text → image → text → evernote link produces 4 blocks in order."""
+    segments = [
+        _make_segment("text", "Before image"),
+        _make_segment("resource", "en-media", value="imghash", mime_type="image/png"),
+        _make_segment("text", "After image"),
+        _make_segment("evernote_link", "Linked Note", value="evernote://view/1/s1/g/g/"),
+    ]
+    blocks, exceptions = segments_to_notion_blocks(
+        segments, {"imghash": "https://cdn.example.com/img.png"}, note_id="n1", note_title="Note"
+    )
+    assert [b["type"] for b in blocks] == ["paragraph", "image", "paragraph", "callout"]
+    assert len(exceptions) == 1  # only the evernote link
+

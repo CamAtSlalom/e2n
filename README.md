@@ -4,6 +4,47 @@ First-pass Evernote `.enex` preparation tool for a later Notion migration.
 
 See [docs/users.md](docs/users.md) for user instructions and parameter explanations.
 
+## Local web interface
+
+The project includes a local-first web interface intended for self-serve usage.
+It runs fully on your machine and uses your existing local processing
+directories.
+
+Start the interface:
+
+```bash
+e2n-ui --open
+```
+
+If your shell has not refreshed new script shims yet, use:
+
+```bash
+PYTHONPATH=src python -m e2n.webui.server --open
+```
+
+Default URL:
+
+```text
+http://127.0.0.1:8787
+```
+
+Common options:
+
+```bash
+e2n-ui --host 127.0.0.1 --port 8787 --open
+e2n-ui --reload
+```
+
+Security default: the server binds to `127.0.0.1` unless you explicitly set a
+different host.
+
+The UI provides:
+
+- Extraction runs
+- Notion import queue execution
+- Run controls (`reset`, `wipe-local`, `wipe-remote`)
+- Local dashboard cards from `state.db`
+
 ## Support
 
 If this tool saves you time and you want to contribute a coffee, you can use

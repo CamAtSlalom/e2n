@@ -206,3 +206,82 @@ def test_notion_import_cli_wipe_local_removes_processing_directory(tmp_path: Pat
     assert exit_code == 0
     assert not output.exists()
     assert f"Wiped local processing output for run {run_id}: {output}" in captured.out
+
+
+def _write_source_with_empty_title_exception(tmp_path: Path) -> Path:
+    source = tmp_path / "Exceptions.enex"
+    source.write_text(
+        """<?xml version="1.0" encoding="UTF-8"?>
+<en-export>
+  <note>
+    <title>   </title>
+    <content><![CDATA[<?xml version="1.0" encoding="UTF-8"?><en-note>Body</en-note>]]></content>
+  </note>
+</en-export>
+""",
+        encoding="utf-8",
+    )
+    return source
+
+
+def test_rebuild_exceptions_cli_dry_run_reports_without_writing(tmp_path: Path, capsys) -> None:
+    source = _write_source_with_empty_title_exception(tmp_path)
+    processing = tmp_path / "processing"
+    extract_enex_notes(source, processing)
+
+    exit_code = main(
+        [
+            "--rebuild-exceptions",
+            "-e",
+            str(source),
+            "-d",
+            str(processing),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    with sqlite3.connect(processing / "Exceptions" / "state.db") as connection:
+        count = connection.execute("SELECT COUNT(*) FROM exception_projection").fetchone()
+
+    assert exit_code == 0
+    assert count is not None
+    assert count[0] == 0
+    assert "Exception rebuild mode: DRY-RUN" in captured.out
+    assert "Dry-run only. Re-run with --apply to write projection tables." in captured.out
+
+
+def test_rebuild_exceptions_cli_apply_writes_projection_tables(tmp_path: Path, capsys) -> None:
+    source = _write_source_with_empty_title_exception(tmp_path)
+    processing = tmp_path / "processing"
+    extract_enex_notes(source, processing)
+
+    exit_code = main(
+        [
+            "--rebuild-exceptions",
+            "-e",
+            str(source),
+            "-d",
+            str(processing),
+            "--apply",
+            "--review-version",
+            "rebuild-test-v1",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    with sqlite3.connect(processing / "Exceptions" / "state.db") as connection:
+        projection_count = connection.execute("SELECT COUNT(*) FROM exception_projection").fetchone()
+        review_count = connection.execute("SELECT COUNT(*) FROM note_reviews").fetchone()
+        review_row = connection.execute(
+            "SELECT review_version, review_result FROM note_reviews WHERE note_id = 'note_000001'"
+        ).fetchone()
+
+    assert exit_code == 0
+    assert projection_count is not None
+    assert review_count is not None
+    assert projection_count[0] == 1
+    assert review_count[0] == 1
+    assert review_row is not None
+    assert review_row[0] == "rebuild-test-v1"
+    assert review_row[1] == "review_passed_with_open_exceptions"
+    assert "Exception rebuild mode: APPLY" in captured.out

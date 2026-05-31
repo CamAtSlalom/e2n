@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from e2n.exceptions import EvernoteEmbeddedLinkRecord, UnsupportedContentRecord
 
@@ -12,9 +13,178 @@ DEFAULT_CONVERTED_PAGE_TITLE = "Evernote Import"
 DEFAULT_EXCEPTIONS_PAGE_TITLE = "Evernote Import Exceptions"
 DEFAULT_EXCEPTIONS_DATABASE_TITLE = "Import-Exceptions"
 EXCEPTION_REASON_PROPERTY = "Reason"
+EXCEPTION_KEY_PROPERTY = "Exception Key"
+EXCEPTION_STATUS_PROPERTY = "Status"
 IMPORT_TAGS_PROPERTY = "Tags"
 
+# ---------------------------------------------------------------------------
+# MIME type registry (REQ-BLOCK-03, REQ-UNSUPPORTED-01)
+# ---------------------------------------------------------------------------
+
+# MIME type prefixes that the Notion API cannot represent as displayable blocks.
+# Audio and video require an external streaming URL — Evernote stores these as
+# base64 blobs, so they cannot be directly uploaded to a Notion audio/video block.
+# Spreadsheets and presentations have no Notion block equivalent at all.
+UNSUPPORTED_MIME_PREFIXES: frozenset[str] = frozenset({
+    "audio/",
+    "video/",
+    "application/vnd.ms-excel",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml",
+    "application/vnd.ms-powerpoint",
+    "application/vnd.openxmlformats-officedocument.presentationml",
+})
+
 JsonObject = dict[str, Any]
+
+
+def mime_to_notion_block_type(mime: str) -> Literal["image", "pdf", "file", "unsupported"]:
+    """Map an attachment MIME type to its Notion block representation.
+
+    Returns:
+        "image"       — Notion image block
+        "pdf"         — Notion pdf block
+        "file"        — Notion file block (generic attachment)
+        "unsupported" — No Notion block can represent this type; use a callout placeholder
+    """
+    mime_lower = mime.lower().strip()
+    if mime_lower.startswith("image/"):
+        return "image"
+    if mime_lower == "application/pdf":
+        return "pdf"
+    for prefix in UNSUPPORTED_MIME_PREFIXES:
+        if mime_lower.startswith(prefix):
+            return "unsupported"
+    return "file"
+
+
+# ---------------------------------------------------------------------------
+# Notion block JSON builders (REQ-BLOCK-03, REQ-LINK-01)
+# ---------------------------------------------------------------------------
+
+def plain_text_span(text: str) -> JsonObject:
+    """Build a Notion rich_text element for a plain text run."""
+    return {"type": "text", "text": {"content": text}}
+
+
+def link_text_span(text: str, url: str) -> JsonObject:
+    """Build a Notion rich_text element carrying an inline link annotation."""
+    return {"type": "text", "text": {"content": text, "link": {"url": url}}}
+
+
+def paragraph_block(rich_text: list[JsonObject]) -> JsonObject:
+    """Build a Notion paragraph block from a list of rich_text spans."""
+    return {"object": "block", "type": "paragraph", "paragraph": {"rich_text": rich_text}}
+
+
+def image_block(url: str) -> JsonObject:
+    """Build a Notion image block referencing an external or uploaded URL."""
+    return {"object": "block", "type": "image", "image": {"type": "external", "external": {"url": url}}}
+
+
+def pdf_block(url: str) -> JsonObject:
+    """Build a Notion pdf block referencing an external or uploaded URL."""
+    return {"object": "block", "type": "pdf", "pdf": {"type": "external", "external": {"url": url}}}
+
+
+def file_block(url: str, filename: str = "") -> JsonObject:
+    """Build a Notion file block for a generic attachment."""
+    payload: JsonObject = {"object": "block", "type": "file", "file": {"type": "external", "external": {"url": url}}}
+    if filename:
+        payload["file"]["name"] = filename
+    return payload
+
+
+# ---------------------------------------------------------------------------
+# Block decomposition (REQ-BLOCK-02, REQ-BLOCK-03, REQ-LINK-01, REQ-LINK-02,
+#                      REQ-UNSUPPORTED-01)
+# ---------------------------------------------------------------------------
+
+def segments_to_notion_blocks(
+    segments: Sequence[Any],  # Sequence[ContentSegment] — imported lazily to avoid circularity
+    resource_map: dict[str, str],
+    note_id: str = "",
+    note_title: str = "",
+) -> tuple[list[JsonObject], list[UnsupportedContentRecord | EvernoteEmbeddedLinkRecord]]:
+    """Convert planned content segments into Notion block JSON payloads.
+
+    Consecutive ``text`` and ``http_link`` segments are merged into a single
+    paragraph block with appropriate rich_text annotations.  Non-inline segments
+    (resources, evernote links, tables) flush any pending inline run first, then
+    emit their own block.
+
+    Args:
+        segments:     Ordered sequence of ``ContentSegment`` objects from ``plan_enml_segments``.
+        resource_map: Mapping of resource hash → uploaded Notion file URL.  Resources
+                      absent from the map emit an unsupported-content placeholder.
+        note_id:      Source note identifier — recorded on any emitted exception records.
+        note_title:   Source note title — recorded on any emitted exception records.
+
+    Returns:
+        A 2-tuple of (notion_blocks, exception_records).
+    """
+    blocks: list[JsonObject] = []
+    exception_records: list[UnsupportedContentRecord | EvernoteEmbeddedLinkRecord] = []
+    pending_inline: list[JsonObject] = []
+
+    def flush_inline() -> None:
+        if pending_inline:
+            blocks.append(paragraph_block(list(pending_inline)))
+            pending_inline.clear()
+
+    def append_unsupported(segment: Any, reason: str) -> None:
+        record = UnsupportedContentRecord(
+            note_id=note_id,
+            note_title=note_title,
+            error_comment=f"{segment.text} — {reason}",
+        )
+        exception_records.append(record)
+        blocks.append(unsupported_content_marker_block(record))
+
+    for segment in segments:
+        kind = segment.kind
+
+        if kind == "text":
+            pending_inline.append(plain_text_span(segment.text))
+
+        elif kind == "http_link":
+            # Inline link annotation — stays within the surrounding paragraph run.
+            pending_inline.append(link_text_span(segment.text, segment.value))
+
+        elif kind == "evernote_link":
+            # Cannot be resolved until all notes are imported (REQ-LINK-02).
+            flush_inline()
+            record = EvernoteEmbeddedLinkRecord(
+                note_id=note_id,
+                note_title=note_title,
+                link_text=segment.text,
+                link_value=segment.value,
+            )
+            exception_records.append(record)
+            blocks.append(evernote_embedded_link_marker_block(record))
+
+        elif kind == "resource":
+            flush_inline()
+            url = resource_map.get(segment.value, "")
+            block_type = mime_to_notion_block_type(segment.mime_type)
+            if block_type == "unsupported":
+                append_unsupported(segment, f"MIME type {segment.mime_type!r} is not supported by the Notion API")
+            elif not url:
+                # Resource was not uploaded yet; record as unsupported so nothing is silently dropped.
+                append_unsupported(segment, f"{segment.mime_type or 'unknown'} resource not found in resource map")
+            elif block_type == "image":
+                blocks.append(image_block(url))
+            elif block_type == "pdf":
+                blocks.append(pdf_block(url))
+            else:
+                blocks.append(file_block(url))
+
+        elif kind == "table":
+            # HTML tables have no Notion block equivalent (REQ-BLOCK-03).
+            flush_inline()
+            append_unsupported(segment, "HTML table — no Notion block equivalent; manual insertion required")
+
+    flush_inline()
+    return blocks, exception_records
 
 
 class NotionAPIError(RuntimeError):
@@ -29,6 +199,7 @@ class NotionPageRef:
     title: str
     url: str | None
     parent_page_id: str | None
+    parent_database_id: str | None = None
     parent_type: str = ""
 
 
@@ -141,6 +312,36 @@ class NotionClient:
         }
         return _page_ref(self._sdk_call(self._sdk_client.pages.create, **body))
 
+    def create_database_page(self, database_id: str, properties: JsonObject) -> NotionPageRef:
+        """Create one database row page with custom properties."""
+        body = {
+            "parent": {"database_id": database_id},
+            "properties": properties,
+        }
+        return _page_ref(self._sdk_call(self._sdk_client.pages.create, **body))
+
+    def update_page_properties(self, page_id: str, properties: JsonObject) -> NotionPageRef:
+        """Update page/database-row properties."""
+        return _page_ref(self._sdk_call(self._sdk_client.pages.update, page_id=page_id, properties=properties))
+
+    def retrieve_page_raw(self, page_id: str) -> JsonObject:
+        """Retrieve raw page payload including properties."""
+        return self._sdk_call(self._sdk_client.pages.retrieve, page_id=page_id)
+
+    def list_block_children(self, block_id: str) -> list[JsonObject]:
+        """List first-level child blocks for one block/page id."""
+        children: list[JsonObject] = []
+        start_cursor: str | None = None
+        while True:
+            body: JsonObject = {"block_id": block_id, "page_size": 100}
+            if start_cursor:
+                body["start_cursor"] = start_cursor
+            response = self._sdk_call(self._sdk_client.blocks.children.list, **body)
+            children.extend(response.get("results", []))
+            if not response.get("has_more"):
+                return children
+            start_cursor = response.get("next_cursor")
+
     def archive_page(self, page_id: str) -> NotionPageRef:
         """Archive one Notion page by id for cleanup workflows."""
         return _page_ref(self._sdk_call(self._sdk_client.pages.update, page_id=page_id, archived=True))
@@ -197,6 +398,8 @@ def exception_database_properties() -> JsonObject:
     """Return the schema for the Import-Exceptions database."""
     return {
         "Note Name": {"title": {}},
+        EXCEPTION_KEY_PROPERTY: {"rich_text": {}},
+        EXCEPTION_STATUS_PROPERTY: {"select": {"options": [{"name": "Open"}, {"name": "Closed"}]}},
         "Link": {"url": {}},
         EXCEPTION_REASON_PROPERTY: {"multi_select": {}},
         "Error Message": {"rich_text": {}},
@@ -361,12 +564,16 @@ def _find_child_database(
 
 def _page_ref(page: JsonObject) -> NotionPageRef:
     parent = page.get("parent", {})
-    parent_page_id = parent.get("page_id") if parent.get("type") == "page_id" else None
+    parent_page_id = parent.get("page_id") if (parent.get("type") == "page_id" or "page_id" in parent) else None
+    parent_database_id = (
+        parent.get("database_id") if (parent.get("type") == "database_id" or "database_id" in parent) else None
+    )
     return NotionPageRef(
         page_id=page["id"],
         title=_page_title(page),
         url=page.get("url"),
         parent_page_id=parent_page_id,
+        parent_database_id=parent_database_id,
         parent_type=parent.get("type", ""),
     )
 

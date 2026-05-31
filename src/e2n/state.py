@@ -11,6 +11,7 @@ import sqlite3
 from typing import Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from e2n.exception_rebuild import RebuildExceptionRecord
     from e2n.enex import ExtractedNote
 
 
@@ -61,6 +62,14 @@ class NoteRecord:
         if isinstance(loaded, list):
             return tuple(str(item) for item in loaded)
         return ()
+
+
+@dataclass(frozen=True)
+class NotionMapRecord:
+    """One local mapping between source note id and Notion page id."""
+
+    note_id: str
+    notion_object_id: str
 
 
 class ProcessingStateStore:
@@ -318,6 +327,22 @@ class ProcessingStateStore:
         ).fetchall()
         return [str(row["notion_object_id"]) for row in rows]
 
+    def list_notion_mappings(self, run_id: str) -> list[NotionMapRecord]:
+        """Return mapped note_id -> notion_object_id rows for one run."""
+        rows = self._connection.execute(
+            """
+            SELECT note_id, notion_object_id
+            FROM notion_map
+            WHERE run_id = ? AND notion_object_id <> ''
+            ORDER BY note_id ASC
+            """,
+            (run_id,),
+        ).fetchall()
+        return [
+            NotionMapRecord(note_id=str(row["note_id"]), notion_object_id=str(row["notion_object_id"]))
+            for row in rows
+        ]
+
     def clear_notion_map(self, run_id: str) -> int:
         """Delete Notion object mappings for one run."""
         with self._connection:
@@ -459,6 +484,122 @@ class ProcessingStateStore:
                 (OPERATION_STATUS_FAILED, error_message, next_retry, _iso(now), operation_id),
             )
 
+    def reset_exception_projection(self, run_id: str) -> None:
+        """Delete rebuilt exception rows for one run."""
+        with self._connection:
+            self._connection.execute("DELETE FROM exception_projection WHERE run_id = ?", (run_id,))
+
+    def upsert_exception_projection(self, run_id: str, record: RebuildExceptionRecord) -> None:
+        """Insert or update one rebuilt exception row."""
+        now = _utc_now_iso()
+        with self._connection:
+            self._connection.execute(
+                """
+                INSERT INTO exception_projection (
+                    run_id,
+                    exception_id,
+                    note_id,
+                    note_title,
+                    source_file,
+                    source_path,
+                    exception_type,
+                    reason,
+                    severity,
+                    notion_target_type,
+                    notion_target_id,
+                    error_message,
+                    external_resource_ref,
+                    status,
+                    link_text,
+                    link_value,
+                    block_url,
+                    created_at,
+                    updated_at,
+                    resolved_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(run_id, exception_id) DO UPDATE SET
+                    note_id = excluded.note_id,
+                    note_title = excluded.note_title,
+                    source_file = excluded.source_file,
+                    source_path = excluded.source_path,
+                    exception_type = excluded.exception_type,
+                    reason = excluded.reason,
+                    severity = excluded.severity,
+                    notion_target_type = excluded.notion_target_type,
+                    notion_target_id = excluded.notion_target_id,
+                    error_message = excluded.error_message,
+                    external_resource_ref = excluded.external_resource_ref,
+                    status = excluded.status,
+                    link_text = excluded.link_text,
+                    link_value = excluded.link_value,
+                    block_url = excluded.block_url,
+                    updated_at = excluded.updated_at,
+                    resolved_at = excluded.resolved_at
+                """,
+                (
+                    run_id,
+                    record.exception_id,
+                    record.note_id,
+                    record.note_title,
+                    record.source_file,
+                    record.source_path,
+                    record.exception_type,
+                    record.reason,
+                    record.severity,
+                    record.notion_target_type,
+                    record.notion_target_id,
+                    record.error_message,
+                    record.external_resource_ref,
+                    record.status,
+                    record.link_text,
+                    record.link_value,
+                    record.block_url,
+                    now,
+                    now,
+                    None,
+                ),
+            )
+
+    def reset_note_reviews(self, run_id: str) -> None:
+        """Delete rebuilt review rows for one run."""
+        with self._connection:
+            self._connection.execute("DELETE FROM note_reviews WHERE run_id = ?", (run_id,))
+
+    def upsert_note_review(
+        self,
+        run_id: str,
+        note_id: str,
+        review_version: str,
+        review_result: str,
+        review_diff: str,
+    ) -> None:
+        """Insert or update one note review status row."""
+        now = _utc_now_iso()
+        with self._connection:
+            self._connection.execute(
+                """
+                INSERT INTO note_reviews (
+                    run_id,
+                    note_id,
+                    review_version,
+                    review_result,
+                    review_diff,
+                    last_reviewed_at,
+                    created_at,
+                    updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(run_id, note_id) DO UPDATE SET
+                    review_version = excluded.review_version,
+                    review_result = excluded.review_result,
+                    review_diff = excluded.review_diff,
+                    last_reviewed_at = excluded.last_reviewed_at,
+                    updated_at = excluded.updated_at
+                """,
+                (run_id, note_id, review_version, review_result, review_diff, now, now, now),
+            )
+
     def note_content_hash(self, note: ExtractedNote) -> str:
         """Return a deterministic note fingerprint for idempotency decisions."""
         payload = {
@@ -538,6 +679,50 @@ class ProcessingStateStore:
                 CREATE INDEX IF NOT EXISTS idx_notes_status ON notes(run_id, status);
                 CREATE INDEX IF NOT EXISTS idx_operations_ready
                     ON operations(run_id, status, next_retry_at, operation_id);
+
+                CREATE TABLE IF NOT EXISTS exception_projection (
+                    run_id TEXT NOT NULL,
+                    exception_id TEXT NOT NULL,
+                    note_id TEXT NOT NULL,
+                    note_title TEXT NOT NULL,
+                    source_file TEXT NOT NULL,
+                    source_path TEXT NOT NULL,
+                    exception_type TEXT NOT NULL,
+                    reason TEXT NOT NULL,
+                    severity TEXT NOT NULL,
+                    notion_target_type TEXT NOT NULL,
+                    notion_target_id TEXT NOT NULL,
+                    error_message TEXT NOT NULL,
+                    external_resource_ref TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    link_text TEXT NOT NULL,
+                    link_value TEXT NOT NULL,
+                    block_url TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    resolved_at TEXT,
+                    PRIMARY KEY (run_id, exception_id),
+                    FOREIGN KEY (run_id) REFERENCES runs(run_id) ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_exception_projection_status
+                    ON exception_projection(run_id, status, reason, severity);
+
+                CREATE TABLE IF NOT EXISTS note_reviews (
+                    run_id TEXT NOT NULL,
+                    note_id TEXT NOT NULL,
+                    review_version TEXT NOT NULL,
+                    review_result TEXT NOT NULL,
+                    review_diff TEXT NOT NULL,
+                    last_reviewed_at TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (run_id, note_id),
+                    FOREIGN KEY (run_id) REFERENCES runs(run_id) ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_note_reviews_result
+                    ON note_reviews(run_id, review_result);
                 """
             )
 
