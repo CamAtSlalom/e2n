@@ -257,28 +257,38 @@ def create_app() -> FastAPI:
             from e2n.enex import discover_enex_sources
             from e2n.enml import plan_enml_segments
             from e2n.notion import segments_to_notion_blocks
+            import logging
+            log = logging.getLogger("e2n.webui.import")
 
             client = NotionClient(notion_key)
             bootstrap = bootstrap_notion_pages(notion_key, root_title=notion_root)
+            log.info("Bootstrap complete: converted=%s exceptions=%s", bootstrap.converted.page_id, bootstrap.exceptions.page_id)
             sources = discover_enex_sources(source)
+            log.info("Sources: %s", [s.name for s in sources])
 
+            imported_count = 0
             for src in sources:
                 output_dir = proc_dir.expanduser().resolve() / src.stem
                 state_path = output_dir / "state.db"
                 if not state_path.exists():
+                    log.warning("No state.db for source %s at %s — skipping", src.name, state_path)
                     continue
                 import_db = ensure_import_database(client, bootstrap.converted.page_id, src.stem)
+                log.info("Import DB: %s (%s)", import_db.title, import_db.database_id)
                 exc_db = ensure_exception_database(client, bootstrap.exceptions.page_id)
 
                 store = ProcessingStateStore(state_path)
                 try:
                     run_id = store.latest_run_id()
                     if not run_id:
+                        log.warning("No run_id in state.db for %s — skipping", src.name)
                         continue
                     notes = store.list_notes(run_id, status="extracted")
+                    log.info("Found %d extracted notes for run %s", len(notes), run_id)
                     for note in notes:
                         note_file = output_dir / "notes" / f"{note.note_id}.enex"
                         if not note_file.exists():
+                            log.warning("Note file missing: %s — skipping", note_file)
                             continue
                         from lxml import etree
                         tree = etree.parse(str(note_file), parser=etree.XMLParser(recover=True))
@@ -291,15 +301,18 @@ def create_app() -> FastAPI:
                         blocks, _exc = segments_to_notion_blocks(
                             segments, {}, note_id=note.note_id, note_title=note.title
                         )
-                        client.import_note_blocks(
+                        page_id = client.import_note_blocks(
                             database_id=import_db.database_id,
                             title=note.title,
                             tags=tuple(note.tags),
                             blocks=blocks,
                         )
+                        log.info("Imported note %s → page %s (%d blocks)", note.note_id, page_id, len(blocks))
+                        imported_count += 1
                 finally:
                     store.close()
 
+            log.info("Import complete: %d notes imported", imported_count)
             _wizard_state["step4_complete"] = "true"
             return RedirectResponse(url="/wizard/step/5", status_code=303)
         except Exception as exc:
