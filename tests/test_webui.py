@@ -209,3 +209,89 @@ def test_wizard_step_4_shows_import_page(client, tmp_path) -> None:
     response = client.get("/wizard/step/4")
     assert response.status_code == 200
     assert "import" in response.text.lower()
+
+
+
+# --- Step 4: Import trigger ---
+
+
+def test_wizard_step_4_post_triggers_import(client, tmp_path) -> None:
+    """POST /wizard/step/4 should run import (mocked Notion) and redirect to step 5."""
+    source = tmp_path / "Imp.enex"
+    source.write_text(
+        '<?xml version="1.0"?><en-export><note><title>N</title>'
+        '<content><![CDATA[<?xml version="1.0"?><en-note>text</en-note>]]></content></note></en-export>',
+        encoding="utf-8",
+    )
+    proc_dir = tmp_path / "proc"
+
+    from unittest.mock import patch, MagicMock
+    from e2n.notion import NotionPageRef, NotionDatabaseRef, NotionBootstrapResult
+
+    mock_client = MagicMock()
+    mock_client.search_pages.return_value = []
+    mock_client.search_databases.return_value = []
+    mock_client.import_note_blocks.return_value = "page-id-1"
+    mock_client.list_block_children.return_value = []
+
+    mock_bootstrap = NotionBootstrapResult(
+        root=NotionPageRef(page_id="root-1", title="Root", url=None, parent_page_id=None),
+        converted=NotionPageRef(page_id="conv-1", title="Evernote Import", url=None, parent_page_id="root-1"),
+        exceptions=NotionPageRef(page_id="exc-1", title="Evernote Import Exceptions", url=None, parent_page_id="root-1"),
+    )
+    mock_import_db = NotionDatabaseRef(database_id="db-1", title="Imp", url=None, parent_page_id="conv-1")
+    mock_exc_db = NotionDatabaseRef(database_id="exc-db-1", title="Import-Exceptions", url=None, parent_page_id="exc-1")
+
+    with patch("e2n.webui.app.NotionClient", return_value=mock_client):
+        client.post("/wizard/step/1", data={"enex_source": str(source), "processing_directory": str(proc_dir)})
+        client.post("/wizard/step/2", data={"notion_key": "ntn_k", "notion_root": ""})
+
+    client.post("/wizard/step/3")  # extract
+
+    with patch("e2n.webui.app.NotionClient", return_value=mock_client), \
+         patch("e2n.webui.app.bootstrap_notion_pages", return_value=mock_bootstrap), \
+         patch("e2n.webui.app.ensure_import_database", return_value=mock_import_db), \
+         patch("e2n.webui.app.ensure_exception_database", return_value=mock_exc_db):
+        response = client.post("/wizard/step/4", follow_redirects=False)
+
+    assert response.status_code in (302, 303)
+    assert "step/5" in response.headers.get("location", "")
+
+
+# --- Step 5: Review ---
+
+
+def test_wizard_step_5_shows_exception_summary(client, tmp_path) -> None:
+    """GET /wizard/step/5 should display exception summary."""
+    source = tmp_path / "Rev.enex"
+    source.write_text(
+        '<?xml version="1.0"?><en-export><note><title>  </title>'
+        '<content><![CDATA[<?xml version="1.0"?><en-note></en-note>]]></content></note></en-export>',
+        encoding="utf-8",
+    )
+    proc_dir = tmp_path / "proc"
+
+    from unittest.mock import patch, MagicMock
+    mock_client = MagicMock()
+    mock_client.search_pages.return_value = []
+    mock_client.search_databases.return_value = []
+    mock_client._sdk_client = MagicMock()
+    mock_client._sdk_client.pages.create.return_value = {"id": "p1", "url": "https://notion.so/p"}
+    mock_client._sdk_client.databases.create.return_value = {
+        "id": "db1", "url": "https://notion.so/db", "title": [{"text": {"content": "Rev"}}],
+        "parent": {"page_id": "par1"},
+    }
+    mock_client._sdk_client.blocks.children.list.return_value = {"results": [], "has_more": False}
+
+    with patch("e2n.webui.app.NotionClient", return_value=mock_client):
+        client.post("/wizard/step/1", data={"enex_source": str(source), "processing_directory": str(proc_dir)})
+        client.post("/wizard/step/2", data={"notion_key": "ntn_k", "notion_root": ""})
+
+    client.post("/wizard/step/3")
+
+    with patch("e2n.webui.app.NotionClient", return_value=mock_client):
+        client.post("/wizard/step/4")
+
+    response = client.get("/wizard/step/5")
+    assert response.status_code == 200
+    assert "review" in response.text.lower() or "exception" in response.text.lower() or "complete" in response.text.lower()

@@ -13,7 +13,12 @@ from fastapi.templating import Jinja2Templates
 
 from e2n.cli import run_notion_import
 from e2n.enex import extract_enex_notes
-from e2n.notion import NotionClient
+from e2n.notion import (
+    NotionClient,
+    bootstrap_notion_pages,
+    ensure_import_database,
+    ensure_exception_database,
+)
 from e2n.state import ProcessingStateStore
 
 
@@ -226,6 +231,97 @@ def create_app() -> FastAPI:
             request=request,
             name="wizard_step4.html",
             context={"error": ""},
+        )
+
+    @app.post("/wizard/step/4")
+    def wizard_step_4_post(request: Request):
+        if _wizard_state.get("step3_complete") != "true":
+            return RedirectResponse(url="/wizard/step/3", status_code=303)
+        try:
+            source = Path(_wizard_state["enex_source"])
+            proc_dir = Path(_wizard_state["processing_directory"])
+            notion_key = _wizard_state.get("notion_key", "")
+            notion_root = _wizard_state.get("notion_root") or None
+
+            from e2n.enex import discover_enex_sources
+            from e2n.enml import plan_enml_segments
+            from e2n.notion import segments_to_notion_blocks
+
+            client = NotionClient(notion_key)
+            bootstrap = bootstrap_notion_pages(notion_key, root_title=notion_root)
+            sources = discover_enex_sources(source)
+
+            for src in sources:
+                output_dir = proc_dir.expanduser().resolve() / src.stem
+                state_path = output_dir / "state.db"
+                if not state_path.exists():
+                    continue
+                import_db = ensure_import_database(client, bootstrap.converted.page_id, src.stem)
+                exc_db = ensure_exception_database(client, bootstrap.exceptions.page_id)
+
+                store = ProcessingStateStore(state_path)
+                try:
+                    run_id = store.latest_run_id()
+                    if not run_id:
+                        continue
+                    notes = store.list_notes(run_id, status="extracted")
+                    for note in notes:
+                        note_file = output_dir / "notes" / f"{note.note_id}.enex"
+                        if not note_file.exists():
+                            continue
+                        from lxml import etree
+                        tree = etree.parse(str(note_file), parser=etree.XMLParser(recover=True))
+                        root = tree.getroot()
+                        note_el = root.find("note") if root.tag != "note" else root
+                        content_el = note_el.find("content") if note_el is not None else None
+                        content_text = content_el.text or "" if content_el is not None else ""
+
+                        segments = plan_enml_segments(content_text)
+                        blocks, _exc = segments_to_notion_blocks(
+                            segments, {}, note_id=note.note_id, note_title=note.title
+                        )
+                        client.import_note_blocks(
+                            database_id=import_db.database_id,
+                            title=note.title,
+                            tags=tuple(note.tags),
+                            blocks=blocks,
+                        )
+                finally:
+                    store.close()
+
+            _wizard_state["step4_complete"] = "true"
+            return RedirectResponse(url="/wizard/step/5", status_code=303)
+        except Exception as exc:
+            return templates.TemplateResponse(
+                request=request,
+                name="wizard_step4.html",
+                context={"error": str(exc)},
+            )
+
+    @app.get("/wizard/step/5", response_class=HTMLResponse)
+    def wizard_step_5(request: Request):
+        if _wizard_state.get("step4_complete") != "true" and _wizard_state.get("step3_complete") != "true":
+            return RedirectResponse(url="/wizard/step/4", status_code=303)
+        # Collect exception summary from processing directories
+        proc_dir = Path(_wizard_state.get("processing_directory", "")).expanduser().resolve()
+        exceptions_summary: list[dict] = []
+        if proc_dir.exists():
+            for child in proc_dir.iterdir():
+                exc_file = child / "exceptions.txt" if child.is_dir() else None
+                if exc_file and exc_file.exists():
+                    lines = exc_file.read_text(encoding="utf-8").strip().splitlines()
+                    for line in lines:
+                        parts = line.split("\t")
+                        if len(parts) >= 3:
+                            exceptions_summary.append({
+                                "note_id": parts[0],
+                                "title": parts[1],
+                                "reasons": parts[2],
+                            })
+        return templates.TemplateResponse(
+            request=request,
+            name="wizard_step5.html",
+            context={"exceptions": exceptions_summary, "total": len(exceptions_summary)},
         )
 
     @app.get("/wizard/progress")
