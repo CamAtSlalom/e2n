@@ -125,6 +125,47 @@ def create_app() -> FastAPI:
         except Exception as exc:
             return _redirect_with_error(processing_dir, str(exc))
 
+    # --- Wizard routes ---
+
+    # In-memory wizard state (per-process; sufficient for single-user local tool)
+    _wizard_state: dict[str, str] = {}
+
+    @app.get("/wizard/", response_class=HTMLResponse)
+    def wizard_root(request: Request) -> HTMLResponse:
+        return templates.TemplateResponse(
+            request=request,
+            name="wizard_step1.html",
+            context={"error": ""},
+        )
+
+    @app.post("/wizard/step/1")
+    def wizard_step_1_post(
+        request: Request,
+        enex_source: str = Form(...),
+        processing_directory: str = Form(...),
+    ):
+        source_path = Path(enex_source).expanduser().resolve()
+        if not source_path.exists():
+            return templates.TemplateResponse(
+                request=request,
+                name="wizard_step1.html",
+                context={"error": f"Source does not exist: {source_path}"},
+            )
+        _wizard_state["enex_source"] = str(source_path)
+        _wizard_state["processing_directory"] = processing_directory
+        _wizard_state["step1_complete"] = "true"
+        return RedirectResponse(url="/wizard/step/2", status_code=303)
+
+    @app.get("/wizard/step/2", response_class=HTMLResponse)
+    def wizard_step_2(request: Request):
+        if _wizard_state.get("step1_complete") != "true":
+            return RedirectResponse(url="/wizard/", status_code=303)
+        return templates.TemplateResponse(
+            request=request,
+            name="wizard_step2.html",
+            context={"error": ""},
+        )
+
     return app
 
 
