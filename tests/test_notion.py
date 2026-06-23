@@ -979,3 +979,102 @@ def test_execute_notion_operation_import_note_uses_resource_manifest(tmp_path) -
     assert result == "page-with-img"
     # Should have uploaded the file
     assert mock_api.request.call_count == 2
+
+
+
+# --- exception-tracking spec: Runtime exception row creation + marker block_id capture ---
+
+
+def test_create_exception_row_in_notion(monkeypatch) -> None:
+    """Exception rows should be created in the Import-Exceptions database, not under import pages."""
+    from unittest.mock import MagicMock
+    from e2n.notion import NotionClient, create_exception_row
+
+    client = NotionClient.__new__(NotionClient)
+    mock_api = MagicMock()
+    client._sdk_client = mock_api
+    mock_api.pages.create.return_value = {"id": "exc-row-id", "url": "https://notion.so/exc"}
+
+    row_id = create_exception_row(
+        client,
+        exception_database_id="exc-db-123",
+        note_name="My Note",
+        reasons=("Evernote Link",),
+        error_message="Link requires manual resolution",
+        source_file="Enduring.enex",
+        link_text="Original Note",
+        link_value="evernote:///view/123/s1/guid/guid/",
+        page_url="https://notion.so/imported-page",
+    )
+
+    assert row_id == "exc-row-id"
+    create_kwargs = mock_api.pages.create.call_args[1]
+    # Must target the exception database, NOT an import database
+    assert create_kwargs["parent"]["database_id"] == "exc-db-123"
+    # Must have Reason multi-select
+    props = create_kwargs["properties"]
+    assert "Reason" in props
+
+
+def test_import_note_captures_marker_block_ids() -> None:
+    """When marker blocks are appended, their block_ids should be returned for state.db storage."""
+    from unittest.mock import MagicMock
+    from e2n.notion import NotionClient, segments_to_notion_blocks
+    from e2n.enml import ContentSegment
+
+    client = NotionClient.__new__(NotionClient)
+    mock_api = MagicMock()
+    client._sdk_client = mock_api
+
+    # Simulate pages.create returning the page with block children that include a callout
+    mock_api.pages.create.return_value = {"id": "page-1", "url": "https://notion.so/p"}
+    # blocks.children.list returns the appended blocks with their IDs
+    mock_api.blocks.children.list.return_value = {
+        "results": [
+            {"id": "block-para-1", "type": "paragraph"},
+            {"id": "block-callout-1", "type": "callout"},
+        ],
+        "has_more": False,
+    }
+
+    segments = [
+        ContentSegment(kind="text", text="Hello"),
+        ContentSegment(kind="evernote_link", text="Other Note", value="evernote:///view/1/s/g/g/"),
+    ]
+    blocks, exceptions = segments_to_notion_blocks(segments, {}, note_id="n1", note_title="Test")
+
+    # The callout block is the marker — we need its block_id after creation
+    assert len(exceptions) == 1
+    # After import, caller should be able to list children and find callout block_ids
+    children = client.list_block_children("page-1")
+    callout_ids = [b["id"] for b in children if b["type"] == "callout"]
+    assert callout_ids == ["block-callout-1"]
+
+
+def test_delete_block_removes_marker() -> None:
+    """NotionClient.delete_block should call DELETE on the Notion API."""
+    from unittest.mock import MagicMock
+    from e2n.notion import NotionClient
+
+    client = NotionClient.__new__(NotionClient)
+    mock_api = MagicMock()
+    client._sdk_client = mock_api
+    mock_api.blocks.delete.return_value = {"id": "block-123", "archived": True}
+
+    client.delete_block("block-123")
+
+    mock_api.blocks.delete.assert_called_once_with(block_id="block-123")
+
+
+def test_delete_block_handles_already_deleted() -> None:
+    """If a marker block was already deleted (404), delete_block should not raise."""
+    from unittest.mock import MagicMock
+    from e2n.notion import NotionClient, NotionAPIError
+
+    client = NotionClient.__new__(NotionClient)
+    mock_api = MagicMock()
+    client._sdk_client = mock_api
+    mock_api.blocks.delete.side_effect = Exception("Could not find block")
+
+    # Should not raise — graceful handling of already-deleted blocks
+    client.delete_block("block-gone")

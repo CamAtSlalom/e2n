@@ -535,6 +535,13 @@ class NotionClient:
 
         return page_id
 
+    def delete_block(self, block_id: str) -> None:
+        """Delete a block by ID. Handles already-deleted blocks gracefully."""
+        try:
+            self._sdk_call(self._sdk_client.blocks.delete, block_id=block_id)
+        except NotionAPIError:
+            pass  # Block already deleted or not found — acceptable
+
     def _sdk_call(self, sdk_method: Any, **kwargs: Any) -> JsonObject:
         try:
             return sdk_method(**kwargs)
@@ -687,6 +694,41 @@ def ensure_child_database(
     if existing is not None:
         return existing
     return client.create_database(parent_page_id, database_title, properties)
+
+
+def create_exception_row(
+    client: NotionClient,
+    exception_database_id: str,
+    note_name: str,
+    reasons: tuple[str, ...] | list[str],
+    error_message: str = "",
+    source_file: str = "",
+    link_text: str = "",
+    link_value: str = "",
+    page_url: str = "",
+) -> str:
+    """Create one row in the Import-Exceptions database. Returns the row page_id."""
+    properties: JsonObject = {
+        "Note Name": {"title": [{"text": {"content": note_name}}]},
+        EXCEPTION_REASON_PROPERTY: exception_reason_property(reasons),
+    }
+    if error_message:
+        properties["Error Message"] = {"rich_text": [{"text": {"content": error_message[:2000]}}]}
+    if source_file:
+        properties["Source File"] = {"rich_text": [{"text": {"content": source_file[:2000]}}]}
+    if link_text:
+        properties["Linkable Text"] = {"rich_text": [{"text": {"content": link_text[:2000]}}]}
+    if link_value:
+        properties["Linkable Text"] = {"rich_text": [{"text": {"content": link_value[:2000]}}]}
+    if page_url:
+        properties["Link"] = {"url": page_url}
+
+    body: JsonObject = {
+        "parent": {"database_id": exception_database_id},
+        "properties": properties,
+    }
+    response = client._sdk_call(client._sdk_client.pages.create, **body)
+    return response["id"]
 
 
 def _select_root_page(pages: list[NotionPageRef], root_title: str | None) -> NotionPageRef:
