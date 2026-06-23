@@ -324,6 +324,83 @@ def create_app() -> FastAPI:
             context={"exceptions": exceptions_summary, "total": len(exceptions_summary)},
         )
 
+    # --- Resolution Workbench routes ---
+
+    def _load_exceptions_from_processing() -> list[dict]:
+        """Load all exception records from processing directories."""
+        proc_dir = Path(_wizard_state.get("processing_directory", "")).expanduser().resolve()
+        exceptions: list[dict] = []
+        if not proc_dir.exists():
+            return exceptions
+        for child in proc_dir.iterdir():
+            if not child.is_dir():
+                continue
+            exc_file = child / "exceptions.txt"
+            if not exc_file.exists():
+                continue
+            for line in exc_file.read_text(encoding="utf-8").strip().splitlines():
+                parts = line.split("\t")
+                if len(parts) >= 3:
+                    exceptions.append({
+                        "note_id": parts[0],
+                        "title": parts[1],
+                        "reasons": parts[2],
+                        "source": parts[3] if len(parts) > 3 else "",
+                        "block_url": parts[4] if len(parts) > 4 else "",
+                        "link_text": parts[5] if len(parts) > 5 else "",
+                        "link_value": parts[6] if len(parts) > 6 else "",
+                    })
+        return exceptions
+
+    @app.get("/resolve/", response_class=HTMLResponse)
+    def resolve_dashboard(request: Request):
+        exceptions = _load_exceptions_from_processing()
+        # Group by reason category
+        categories: dict[str, int] = {}
+        for exc in exceptions:
+            for reason in exc["reasons"].split(","):
+                reason = reason.strip()
+                if reason:
+                    categories[reason] = categories.get(reason, 0) + 1
+        # Group by note for "by page" view
+        pages: dict[str, int] = {}
+        for exc in exceptions:
+            pages[exc["note_id"]] = pages.get(exc["note_id"], 0) + 1
+        return templates.TemplateResponse(
+            request=request,
+            name="resolve_dashboard.html",
+            context={"categories": categories, "pages": pages, "total": len(exceptions)},
+        )
+
+    @app.get("/resolve/type/{reason_slug}", response_class=HTMLResponse)
+    def resolve_by_type(request: Request, reason_slug: str):
+        exceptions = _load_exceptions_from_processing()
+        # Map slug to reason (e.g., "evernote-link" → "Evernote Link")
+        reason_map = {
+            "evernote-link": "Evernote Link",
+            "empty-title": "Empty Title",
+            "no-content": "No Content",
+            "unsupported-content": "Unsupported Content",
+            "encrypted": "Encrypted",
+        }
+        target_reason = reason_map.get(reason_slug, reason_slug)
+        filtered = [e for e in exceptions if target_reason in e["reasons"]]
+        return templates.TemplateResponse(
+            request=request,
+            name="resolve_by_type.html",
+            context={"exceptions": filtered, "reason": target_reason},
+        )
+
+    @app.get("/resolve/page/{note_id}", response_class=HTMLResponse)
+    def resolve_by_page(request: Request, note_id: str):
+        exceptions = _load_exceptions_from_processing()
+        filtered = [e for e in exceptions if e["note_id"] == note_id]
+        return templates.TemplateResponse(
+            request=request,
+            name="resolve_by_page.html",
+            context={"exceptions": filtered, "note_id": note_id},
+        )
+
     @app.get("/wizard/progress")
     def wizard_progress():
         proc_dir = _wizard_state.get("processing_directory", "")

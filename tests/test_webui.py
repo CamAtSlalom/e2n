@@ -295,3 +295,84 @@ def test_wizard_step_5_shows_exception_summary(client, tmp_path) -> None:
     response = client.get("/wizard/step/5")
     assert response.status_code == 200
     assert "review" in response.text.lower() or "exception" in response.text.lower() or "complete" in response.text.lower()
+
+
+
+# --- Resolution Workbench ---
+
+
+def test_resolve_dashboard_shows_categories(client, tmp_path) -> None:
+    """GET /resolve/ should show exception categories with counts."""
+    # Set up a processing dir with exceptions
+    source = tmp_path / "Res.enex"
+    source.write_text(
+        '<?xml version="1.0"?><en-export>'
+        '<note><title>  </title><content><![CDATA[<?xml version="1.0"?><en-note></en-note>]]></content></note>'
+        '<note><title>Link Note</title><content><![CDATA[<?xml version="1.0"?><en-note>'
+        '<a href="evernote:///view/1/s/g/g/">Other</a></en-note>]]></content></note>'
+        '</en-export>',
+        encoding="utf-8",
+    )
+    proc_dir = tmp_path / "proc"
+    client.post("/wizard/step/1", data={"enex_source": str(source), "processing_directory": str(proc_dir)})
+
+    from unittest.mock import patch, MagicMock
+    mock_client = MagicMock()
+    mock_client.search_pages.return_value = []
+    with patch("e2n.webui.app.NotionClient", return_value=mock_client):
+        client.post("/wizard/step/2", data={"notion_key": "ntn_k", "notion_root": ""})
+    client.post("/wizard/step/3")
+
+    response = client.get("/resolve/")
+    assert response.status_code == 200
+    assert "evernote link" in response.text.lower() or "evernote" in response.text.lower()
+
+
+def test_resolve_by_type_lists_exceptions(client, tmp_path) -> None:
+    """GET /resolve/type/evernote-link should list all evernote link exceptions."""
+    source = tmp_path / "Links.enex"
+    source.write_text(
+        '<?xml version="1.0"?><en-export>'
+        '<note><title>LN</title><content><![CDATA[<?xml version="1.0"?><en-note>'
+        '<a href="evernote:///view/1/s/g/g/">Target</a></en-note>]]></content></note>'
+        '</en-export>',
+        encoding="utf-8",
+    )
+    proc_dir = tmp_path / "proc"
+    client.post("/wizard/step/1", data={"enex_source": str(source), "processing_directory": str(proc_dir)})
+
+    from unittest.mock import patch, MagicMock
+    mock_client = MagicMock()
+    mock_client.search_pages.return_value = []
+    with patch("e2n.webui.app.NotionClient", return_value=mock_client):
+        client.post("/wizard/step/2", data={"notion_key": "ntn_k", "notion_root": ""})
+    client.post("/wizard/step/3")
+
+    response = client.get("/resolve/type/evernote-link")
+    assert response.status_code == 200
+    assert "Target" in response.text or "LN" in response.text
+
+
+def test_resolve_by_page_lists_exceptions_for_one_note(client, tmp_path) -> None:
+    """GET /resolve/page/{note_id} should show all exceptions for that note."""
+    source = tmp_path / "Multi.enex"
+    source.write_text(
+        '<?xml version="1.0"?><en-export>'
+        '<note><title>  </title><content><![CDATA[<?xml version="1.0"?><en-note>'
+        '<a href="evernote:///view/1/s/g/g/">Link</a></en-note>]]></content></note>'
+        '</en-export>',
+        encoding="utf-8",
+    )
+    proc_dir = tmp_path / "proc"
+    client.post("/wizard/step/1", data={"enex_source": str(source), "processing_directory": str(proc_dir)})
+
+    from unittest.mock import patch, MagicMock
+    mock_client = MagicMock()
+    mock_client.search_pages.return_value = []
+    with patch("e2n.webui.app.NotionClient", return_value=mock_client):
+        client.post("/wizard/step/2", data={"notion_key": "ntn_k", "notion_root": ""})
+    client.post("/wizard/step/3")
+
+    response = client.get("/resolve/page/note_000001")
+    assert response.status_code == 200
+    assert "Empty Title" in response.text or "Evernote Link" in response.text
