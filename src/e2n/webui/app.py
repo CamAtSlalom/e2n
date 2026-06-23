@@ -472,7 +472,6 @@ def create_app() -> FastAPI:
     def resolve_decrypt_view(request: Request, note_id: str):
         exceptions = _load_exceptions_from_processing()
         note_exceptions = [e for e in exceptions if e["note_id"] == note_id]
-        # Find hint from the exception data or from the note file
         hint = ""
         proc_dir = Path(_wizard_state.get("processing_directory", "")).expanduser().resolve()
         if proc_dir.exists():
@@ -481,17 +480,105 @@ def create_app() -> FastAPI:
                     continue
                 note_file = child / "notes" / f"{note_id}.enex"
                 if note_file.exists():
-                    content = note_file.read_text(encoding="utf-8")
-                    import re
-                    hint_match = re.search(r'hint="([^"]*)"', content)
-                    if hint_match:
-                        hint = hint_match.group(1)
+                    from lxml import etree as _etree
+                    tree = _etree.parse(str(note_file), parser=_etree.XMLParser(recover=True))
+                    root = tree.getroot()
+                    note_el = root.find("note") if root.tag != "note" else root
+                    content_el = note_el.find("content") if note_el is not None else None
+                    content_text = content_el.text or "" if content_el is not None else ""
+                    if content_text:
+                        try:
+                            enml_root = _etree.fromstring(content_text.encode("utf-8"), parser=_etree.XMLParser(recover=True))
+                            for crypt_el in enml_root.iter():
+                                if crypt_el.tag == "en-crypt" or (crypt_el.tag and crypt_el.tag.endswith("en-crypt")):
+                                    hint = crypt_el.attrib.get("hint", "")
+                                    break
+                        except Exception:
+                            pass
                     break
         return templates.TemplateResponse(
             request=request,
             name="resolve_decrypt.html",
             context={"note_id": note_id, "hint": hint, "exceptions": note_exceptions},
         )
+
+    @app.post("/resolve/decrypt/{note_id}", response_class=HTMLResponse)
+    def resolve_decrypt_post(request: Request, note_id: str, passphrase: str = Form(...)):
+        import re as _re
+        import base64 as _b64
+        import hashlib as _hashlib
+
+        proc_dir = Path(_wizard_state.get("processing_directory", "")).expanduser().resolve()
+        encrypted_b64 = ""
+        hint = ""
+        cipher_name = "AES"
+        key_length = 128
+
+        # Find the encrypted content in the note file
+        if proc_dir.exists():
+            for child in proc_dir.iterdir():
+                if not child.is_dir():
+                    continue
+                note_file = child / "notes" / f"{note_id}.enex"
+                if note_file.exists():
+                    from lxml import etree as _etree
+                    tree = _etree.parse(str(note_file), parser=_etree.XMLParser(recover=True))
+                    root = tree.getroot()
+                    note_el = root.find("note") if root.tag != "note" else root
+                    content_el = note_el.find("content") if note_el is not None else None
+                    content_text = content_el.text or "" if content_el is not None else ""
+                    # Parse the ENML content to find en-crypt
+                    if content_text:
+                        try:
+                            enml_root = _etree.fromstring(content_text.encode("utf-8"), parser=_etree.XMLParser(recover=True))
+                            for crypt_el in enml_root.iter():
+                                if crypt_el.tag == "en-crypt" or (crypt_el.tag and crypt_el.tag.endswith("en-crypt")):
+                                    hint = crypt_el.attrib.get("hint", "")
+                                    cipher_name = crypt_el.attrib.get("cipher", "AES")
+                                    length_str = crypt_el.attrib.get("length", "128")
+                                    key_length = int(length_str) if length_str.isdigit() else 128
+                                    encrypted_b64 = (crypt_el.text or "").strip()
+                                    break
+                        except Exception:
+                            pass
+                    break
+
+        if not encrypted_b64:
+            return templates.TemplateResponse(
+                request=request,
+                name="resolve_decrypt_result.html",
+                context={"note_id": note_id, "hint": hint, "error": "No encrypted content found.", "decrypted": ""},
+            )
+
+        # Attempt decryption
+        try:
+            from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+            from cryptography.hazmat.primitives import padding
+
+            raw = _b64.b64decode(encrypted_b64)
+            key = _hashlib.md5(passphrase.encode("utf-8")).digest()[:key_length // 8]
+            iv = raw[:16]
+            ciphertext = raw[16:]
+
+            cipher = Cipher(algorithms.AES(key), modes.CBC(iv))
+            decryptor = cipher.decryptor()
+            padded = decryptor.update(ciphertext) + decryptor.finalize()
+
+            unpadder = padding.PKCS7(128).unpadder()
+            decrypted_bytes = unpadder.update(padded) + unpadder.finalize()
+            decrypted_text = decrypted_bytes.decode("utf-8")
+
+            return templates.TemplateResponse(
+                request=request,
+                name="resolve_decrypt_result.html",
+                context={"note_id": note_id, "hint": hint, "error": "", "decrypted": decrypted_text},
+            )
+        except Exception:
+            return templates.TemplateResponse(
+                request=request,
+                name="resolve_decrypt_result.html",
+                context={"note_id": note_id, "hint": hint, "error": "Decryption failed — wrong passphrase or corrupted data.", "decrypted": ""},
+            )
 
     @app.get("/wizard/progress")
     def wizard_progress():

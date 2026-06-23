@@ -598,3 +598,86 @@ def test_resolve_decrypt_view_requires_passphrase(client, tmp_path) -> None:
     assert response.status_code == 200
     assert "passphrase" in response.text.lower() or "password" in response.text.lower()
     assert "pet name" in response.text  # hint should be shown
+
+
+
+# --- Decrypt action ---
+
+
+def test_resolve_decrypt_post_shows_decrypted_content(client, tmp_path) -> None:
+    """POST /resolve/decrypt/{note_id} with correct passphrase should show decrypted text."""
+    # Create an encrypted note using AES-128-CBC (Evernote's format)
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+    from cryptography.hazmat.primitives import padding
+    import base64, hashlib, os
+
+    passphrase = "mysecret"
+    plaintext = b"This is my secret password: hunter2"
+
+    # Evernote uses passphrase → MD5 → AES key (128-bit)
+    key = hashlib.md5(passphrase.encode("utf-8")).digest()
+    iv = os.urandom(16)
+    padder = padding.PKCS7(128).padder()
+    padded = padder.update(plaintext) + padder.finalize()
+    cipher = Cipher(algorithms.AES(key), modes.CBC(iv))
+    encryptor = cipher.encryptor()
+    ciphertext = encryptor.update(padded) + encryptor.finalize()
+    # Evernote stores: IV + ciphertext, base64 encoded
+    encrypted_b64 = base64.b64encode(iv + ciphertext).decode()
+
+    source = tmp_path / "Enc.enex"
+    source.write_text(
+        f'<?xml version="1.0"?><en-export><note><title>Secret Note</title>'
+        f'<content><![CDATA[<?xml version="1.0"?><en-note>'
+        f'<en-crypt hint="pet" cipher="AES" length="128">{encrypted_b64}</en-crypt>'
+        f'</en-note>]]></content></note></en-export>',
+        encoding="utf-8",
+    )
+    proc_dir = tmp_path / "proc"
+    client.post("/wizard/step/1", data={"enex_source": str(source), "processing_directory": str(proc_dir)})
+
+    from unittest.mock import patch, MagicMock
+    mock_client = MagicMock()
+    mock_client.search_pages.return_value = []
+    with patch("e2n.webui.app.NotionClient", return_value=mock_client):
+        client.post("/wizard/step/2", data={"notion_key": "ntn_k", "notion_root": ""})
+    client.post("/wizard/step/3")
+
+    response = client.post(
+        "/resolve/decrypt/note_000001",
+        data={"passphrase": "mysecret"},
+    )
+    assert response.status_code == 200
+    assert "hunter2" in response.text
+
+
+def test_resolve_decrypt_post_wrong_passphrase_shows_error(client, tmp_path) -> None:
+    """POST /resolve/decrypt/{note_id} with wrong passphrase should show error."""
+    import base64
+    # Just put some random bytes that won't decrypt properly
+    encrypted_b64 = base64.b64encode(b"\x00" * 32).decode()
+
+    source = tmp_path / "Bad.enex"
+    source.write_text(
+        f'<?xml version="1.0"?><en-export><note><title>Locked</title>'
+        f'<content><![CDATA[<?xml version="1.0"?><en-note>'
+        f'<en-crypt hint="nope" cipher="AES" length="128">{encrypted_b64}</en-crypt>'
+        f'</en-note>]]></content></note></en-export>',
+        encoding="utf-8",
+    )
+    proc_dir = tmp_path / "proc"
+    client.post("/wizard/step/1", data={"enex_source": str(source), "processing_directory": str(proc_dir)})
+
+    from unittest.mock import patch, MagicMock
+    mock_client = MagicMock()
+    mock_client.search_pages.return_value = []
+    with patch("e2n.webui.app.NotionClient", return_value=mock_client):
+        client.post("/wizard/step/2", data={"notion_key": "ntn_k", "notion_root": ""})
+    client.post("/wizard/step/3")
+
+    response = client.post(
+        "/resolve/decrypt/note_000001",
+        data={"passphrase": "wrongpassword"},
+    )
+    assert response.status_code == 200
+    assert "error" in response.text.lower() or "failed" in response.text.lower() or "wrong" in response.text.lower()
