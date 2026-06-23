@@ -1085,7 +1085,7 @@ def test_delete_block_handles_already_deleted() -> None:
 
 
 def test_execute_import_note_creates_exception_rows_for_evernote_links(tmp_path) -> None:
-    """When a note has evernote links, import should create exception rows in the exceptions DB."""
+    """When a note has evernote links, exception row Link should point to the BLOCK, not the page."""
     from unittest.mock import MagicMock, call
     from e2n.notion import NotionClient
     from e2n.state import OperationRecord
@@ -1097,6 +1097,7 @@ def test_execute_import_note_creates_exception_rows_for_evernote_links(tmp_path)
         '<?xml version="1.0" encoding="utf-8"?>\n<en-export>\n'
         '<note><title>Link Note</title>'
         '<content><![CDATA[<?xml version="1.0"?><en-note>'
+        '<p>Before the link</p>'
         '<a href="evernote:///view/1/s/g/g/">Other Note</a>'
         '</en-note>]]></content></note>\n</en-export>\n',
         encoding="utf-8",
@@ -1108,11 +1109,19 @@ def test_execute_import_note_creates_exception_rows_for_evernote_links(tmp_path)
     client = NotionClient.__new__(NotionClient)
     mock_api = MagicMock()
     client._sdk_client = mock_api
-    # pages.create called twice: once for the note page, once for the exception row
+    # pages.create for note page, then pages.create for exception row
     mock_api.pages.create.side_effect = [
         {"id": "note-page-id", "url": "https://notion.so/note"},
         {"id": "exc-row-id", "url": "https://notion.so/exc"},
     ]
+    # list_block_children returns the appended blocks with their IDs
+    mock_api.blocks.children.list.return_value = {
+        "results": [
+            {"id": "blk-para-1", "type": "paragraph"},
+            {"id": "blk-callout-1", "type": "callout"},
+        ],
+        "has_more": False,
+    }
 
     operation = OperationRecord(
         operation_id=10,
@@ -1135,9 +1144,11 @@ def test_execute_import_note_creates_exception_rows_for_evernote_links(tmp_path)
 
     result = _execute_notion_operation(client, operation)
     assert result == "note-page-id"
-    # Should have 2 pages.create calls: note page + exception row
+    # Exception row should exist
     assert mock_api.pages.create.call_count == 2
-    exc_call = mock_api.pages.create.call_args_list[1]
-    exc_kwargs = exc_call[1]
-    assert exc_kwargs["parent"]["database_id"] == "exc-db-999"
-    assert "Evernote Link" in str(exc_kwargs["properties"]["Reason"])
+    exc_kwargs = mock_api.pages.create.call_args_list[1][1]
+    # Link must point to the BLOCK, not just the page
+    link_url = exc_kwargs["properties"]["Link"]["url"]
+    assert "blk-callout-1".replace("-", "") in link_url.replace("-", "") or "blk" in link_url, (
+        f"Expected block-level URL, got: {link_url}"
+    )

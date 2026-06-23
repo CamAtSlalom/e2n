@@ -410,8 +410,23 @@ def _execute_import_note(notion: NotionClient, payload: dict) -> str:
     if _exceptions and exception_database_id:
         from e2n.notion import create_exception_row as _create_exc_row
 
-        page_url = f"https://notion.so/{page_id.replace('-', '')}"
-        for exc in _exceptions:
+        # Get block IDs to build block-level URLs (no scanning — direct list after our own append)
+        page_id_clean = page_id.replace("-", "")
+        marker_block_ids: list[str] = []
+        try:
+            children = notion.list_block_children(page_id)
+            marker_block_ids = [b["id"] for b in children if b.get("type") == "callout"]
+        except Exception:
+            pass  # If listing fails, fall back to page-level URLs
+
+        for i, exc in enumerate(_exceptions):
+            # Block-level URL if we have a matching marker block_id
+            if i < len(marker_block_ids):
+                block_id_clean = marker_block_ids[i].replace("-", "")
+                exc_url = f"https://www.notion.so/{page_id_clean}#{block_id_clean}"
+            else:
+                exc_url = f"https://www.notion.so/{page_id_clean}"
+
             reasons = exc.reasons if hasattr(exc, "reasons") else ("Unsupported Content",)
             error_msg = exc.error_comment if hasattr(exc, "error_comment") else exc.marker_text
             _create_exc_row(
@@ -423,7 +438,7 @@ def _execute_import_note(notion: NotionClient, payload: dict) -> str:
                 source_file=str(payload.get("source_file", "")),
                 link_text=getattr(exc, "link_text", ""),
                 link_value=getattr(exc, "link_value", ""),
-                page_url=page_url,
+                page_url=exc_url,
             )
 
     return page_id
