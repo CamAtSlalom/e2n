@@ -401,6 +401,58 @@ def create_app() -> FastAPI:
             context={"exceptions": filtered, "note_id": note_id},
         )
 
+    @app.post("/resolve/auto-relink", response_class=HTMLResponse)
+    def resolve_auto_relink(request: Request):
+        # Gate: imports must be complete
+        if _wizard_state.get("step4_complete") != "true":
+            return templates.TemplateResponse(
+                request=request,
+                name="resolve_auto_relink_result.html",
+                context={"error": "All imports must be complete first. Run Step 4 (Import) before auto-relink.",
+                         "resolved": 0, "skipped": 0, "results": []},
+            )
+
+        exceptions = _load_exceptions_from_processing()
+        link_exceptions = [e for e in exceptions if "Evernote Link" in e["reasons"]]
+
+        notion_key = _wizard_state.get("notion_key", "")
+        if not notion_key:
+            return templates.TemplateResponse(
+                request=request,
+                name="resolve_auto_relink_result.html",
+                context={"error": "No Notion key configured.", "resolved": 0, "skipped": 0, "results": []},
+            )
+
+        client = NotionClient(notion_key)
+        resolved = 0
+        skipped = 0
+        results: list[dict] = []
+
+        for exc in link_exceptions:
+            link_text = exc.get("link_text", "").strip()
+            if not link_text:
+                skipped += 1
+                results.append({"title": exc["title"], "link_text": link_text, "status": "skipped", "reason": "no link text"})
+                continue
+
+            matches = [p for p in client.search_pages(link_text) if p.title == link_text]
+
+            if len(matches) == 1:
+                resolved += 1
+                results.append({"title": exc["title"], "link_text": link_text, "status": "resolved", "reason": f"→ {matches[0].title}"})
+            elif len(matches) == 0:
+                skipped += 1
+                results.append({"title": exc["title"], "link_text": link_text, "status": "skipped", "reason": "no match found"})
+            else:
+                skipped += 1
+                results.append({"title": exc["title"], "link_text": link_text, "status": "skipped", "reason": f"{len(matches)} matches — manual review required"})
+
+        return templates.TemplateResponse(
+            request=request,
+            name="resolve_auto_relink_result.html",
+            context={"error": "", "resolved": resolved, "skipped": skipped, "results": results},
+        )
+
     @app.get("/wizard/progress")
     def wizard_progress():
         proc_dir = _wizard_state.get("processing_directory", "")

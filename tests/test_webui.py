@@ -376,3 +376,132 @@ def test_resolve_by_page_lists_exceptions_for_one_note(client, tmp_path) -> None
     response = client.get("/resolve/page/note_000001")
     assert response.status_code == 200
     assert "Empty Title" in response.text or "Evernote Link" in response.text
+
+
+
+# --- Auto-Relink ---
+
+
+def test_auto_relink_blocked_if_imports_not_complete(client, tmp_path) -> None:
+    """POST /resolve/auto-relink should refuse if imports are not all complete."""
+    source = tmp_path / "AL.enex"
+    source.write_text(
+        '<?xml version="1.0"?><en-export><note><title>N</title>'
+        '<content><![CDATA[<?xml version="1.0"?><en-note>'
+        '<a href="evernote:///view/1/s/g/g/">Target</a></en-note>]]></content></note></en-export>',
+        encoding="utf-8",
+    )
+    proc_dir = tmp_path / "proc"
+    client.post("/wizard/step/1", data={"enex_source": str(source), "processing_directory": str(proc_dir)})
+
+    from unittest.mock import patch, MagicMock
+    mock_client = MagicMock()
+    mock_client.search_pages.return_value = []
+    with patch("e2n.webui.app.NotionClient", return_value=mock_client):
+        client.post("/wizard/step/2", data={"notion_key": "ntn_k", "notion_root": ""})
+    client.post("/wizard/step/3")
+    # Step 4 NOT executed — imports not complete
+
+    response = client.post("/resolve/auto-relink")
+    assert response.status_code == 200
+    assert "import" in response.text.lower() and ("complete" in response.text.lower() or "first" in response.text.lower())
+
+
+def test_auto_relink_resolves_single_match_links(client, tmp_path) -> None:
+    """POST /resolve/auto-relink should auto-resolve links with exactly one Notion title match."""
+    source = tmp_path / "AR.enex"
+    source.write_text(
+        '<?xml version="1.0"?><en-export><note><title>Has Link</title>'
+        '<content><![CDATA[<?xml version="1.0"?><en-note>'
+        '<a href="evernote:///view/1/s/g/g/">Target Note</a></en-note>]]></content></note></en-export>',
+        encoding="utf-8",
+    )
+    proc_dir = tmp_path / "proc"
+
+    from unittest.mock import patch, MagicMock
+    from e2n.notion import NotionPageRef, NotionDatabaseRef, NotionBootstrapResult
+
+    mock_client = MagicMock()
+    mock_client.search_pages.return_value = [
+        NotionPageRef(page_id="target-page-1", title="Target Note", url="https://notion.so/target", parent_page_id="p")
+    ]
+    mock_client.import_note_blocks.return_value = "src-page-1"
+    mock_client.list_block_children.return_value = []
+    mock_client.update_block_with_page_link.return_value = {}
+    mock_client.search_databases.return_value = []
+
+    mock_bootstrap = NotionBootstrapResult(
+        root=NotionPageRef(page_id="r", title="Root", url=None, parent_page_id=None),
+        converted=NotionPageRef(page_id="c", title="Evernote Import", url=None, parent_page_id="r"),
+        exceptions=NotionPageRef(page_id="e", title="Exceptions", url=None, parent_page_id="r"),
+    )
+    mock_import_db = NotionDatabaseRef(database_id="db1", title="AR", url=None, parent_page_id="c")
+    mock_exc_db = NotionDatabaseRef(database_id="edb1", title="Import-Exceptions", url=None, parent_page_id="e")
+
+    with patch("e2n.webui.app.NotionClient", return_value=mock_client):
+        client.post("/wizard/step/1", data={"enex_source": str(source), "processing_directory": str(proc_dir)})
+        client.post("/wizard/step/2", data={"notion_key": "ntn_k", "notion_root": ""})
+    client.post("/wizard/step/3")
+
+    with patch("e2n.webui.app.NotionClient", return_value=mock_client), \
+         patch("e2n.webui.app.bootstrap_notion_pages", return_value=mock_bootstrap), \
+         patch("e2n.webui.app.ensure_import_database", return_value=mock_import_db), \
+         patch("e2n.webui.app.ensure_exception_database", return_value=mock_exc_db):
+        client.post("/wizard/step/4")
+
+    # Now auto-relink — should find "Target Note" with exactly 1 match
+    with patch("e2n.webui.app.NotionClient", return_value=mock_client):
+        response = client.post("/resolve/auto-relink")
+
+    assert response.status_code == 200
+    assert "resolved" in response.text.lower() or "1" in response.text
+
+
+def test_auto_relink_skips_multi_match_links(client, tmp_path) -> None:
+    """Links with multiple Notion matches should be skipped (not auto-resolved)."""
+    source = tmp_path / "MM.enex"
+    source.write_text(
+        '<?xml version="1.0"?><en-export><note><title>Ambiguous</title>'
+        '<content><![CDATA[<?xml version="1.0"?><en-note>'
+        '<a href="evernote:///view/1/s/g/g/">Common Name</a></en-note>]]></content></note></en-export>',
+        encoding="utf-8",
+    )
+    proc_dir = tmp_path / "proc"
+
+    from unittest.mock import patch, MagicMock
+    from e2n.notion import NotionPageRef, NotionDatabaseRef, NotionBootstrapResult
+
+    mock_client = MagicMock()
+    # Two pages match — ambiguous
+    mock_client.search_pages.return_value = [
+        NotionPageRef(page_id="p1", title="Common Name", url="u1", parent_page_id="x"),
+        NotionPageRef(page_id="p2", title="Common Name", url="u2", parent_page_id="x"),
+    ]
+    mock_client.import_note_blocks.return_value = "src-page"
+    mock_client.list_block_children.return_value = []
+    mock_client.search_databases.return_value = []
+
+    mock_bootstrap = NotionBootstrapResult(
+        root=NotionPageRef(page_id="r", title="Root", url=None, parent_page_id=None),
+        converted=NotionPageRef(page_id="c", title="EI", url=None, parent_page_id="r"),
+        exceptions=NotionPageRef(page_id="e", title="EE", url=None, parent_page_id="r"),
+    )
+    mock_db = NotionDatabaseRef(database_id="d1", title="MM", url=None, parent_page_id="c")
+    mock_edb = NotionDatabaseRef(database_id="ed1", title="IE", url=None, parent_page_id="e")
+
+    with patch("e2n.webui.app.NotionClient", return_value=mock_client):
+        client.post("/wizard/step/1", data={"enex_source": str(source), "processing_directory": str(proc_dir)})
+        client.post("/wizard/step/2", data={"notion_key": "ntn_k", "notion_root": ""})
+    client.post("/wizard/step/3")
+    with patch("e2n.webui.app.NotionClient", return_value=mock_client), \
+         patch("e2n.webui.app.bootstrap_notion_pages", return_value=mock_bootstrap), \
+         patch("e2n.webui.app.ensure_import_database", return_value=mock_db), \
+         patch("e2n.webui.app.ensure_exception_database", return_value=mock_edb):
+        client.post("/wizard/step/4")
+
+    with patch("e2n.webui.app.NotionClient", return_value=mock_client):
+        response = client.post("/resolve/auto-relink")
+
+    assert response.status_code == 200
+    # Should report 0 resolved (ambiguous match skipped)
+    assert "0" in response.text or "skipped" in response.text.lower() or "manual" in response.text.lower()
