@@ -45,19 +45,8 @@ def create_app() -> FastAPI:
     app.mount("/static", StaticFiles(directory=str(Path(__file__).parent / "static")), name="static")
 
     @app.get("/", response_class=HTMLResponse)
-    def index(request: Request, processing_dir: str = "./processing", message: str = "", error: str = "") -> HTMLResponse:
-        processing_directory = Path(processing_dir).expanduser().resolve()
-        cards = _collect_run_cards(processing_directory)
-        return templates.TemplateResponse(
-            request=request,
-            name="index.html",
-            context={
-                "processing_dir": str(processing_directory),
-                "cards": cards,
-                "message": message,
-                "error": error,
-            },
-        )
+    def index(request: Request) -> HTMLResponse:
+        return templates.TemplateResponse(request=request, name="index.html")
 
     @app.get("/health")
     def health() -> dict[str, str]:
