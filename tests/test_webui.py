@@ -382,8 +382,8 @@ def test_resolve_by_page_lists_exceptions_for_one_note(client, tmp_path) -> None
 # --- Auto-Relink ---
 
 
-def test_auto_relink_blocked_if_imports_not_complete(client, tmp_path) -> None:
-    """POST /resolve/auto-relink should refuse if imports are not all complete."""
+def test_auto_relink_warns_if_imports_not_complete(client, tmp_path) -> None:
+    """POST /resolve/auto-relink should warn (not block) if imports are not all complete."""
     source = tmp_path / "AL.enex"
     source.write_text(
         '<?xml version="1.0"?><en-export><note><title>N</title>'
@@ -402,9 +402,12 @@ def test_auto_relink_blocked_if_imports_not_complete(client, tmp_path) -> None:
     client.post("/wizard/step/3")
     # Step 4 NOT executed — imports not complete
 
-    response = client.post("/resolve/auto-relink")
+    with patch("e2n.webui.app.NotionClient", return_value=mock_client):
+        response = client.post("/resolve/auto-relink")
+
     assert response.status_code == 200
-    assert "import" in response.text.lower() and ("complete" in response.text.lower() or "first" in response.text.lower())
+    # Should show warning but still run
+    assert "not all imports" in response.text.lower() or "complete" in response.text.lower()
 
 
 def test_auto_relink_resolves_single_match_links(client, tmp_path) -> None:

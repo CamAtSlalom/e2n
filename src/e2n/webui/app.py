@@ -403,14 +403,10 @@ def create_app() -> FastAPI:
 
     @app.post("/resolve/auto-relink", response_class=HTMLResponse)
     def resolve_auto_relink(request: Request):
-        # Gate: imports must be complete
+        # Warn (not block) if imports not complete
+        warning = ""
         if _wizard_state.get("step4_complete") != "true":
-            return templates.TemplateResponse(
-                request=request,
-                name="resolve_auto_relink_result.html",
-                context={"error": "All imports must be complete first. Run Step 4 (Import) before auto-relink.",
-                         "resolved": 0, "skipped": 0, "results": []},
-            )
+            warning = "Not all imports are complete. Some links may not resolve until all sources are imported."
 
         exceptions = _load_exceptions_from_processing()
         link_exceptions = [e for e in exceptions if "Evernote Link" in e["reasons"]]
@@ -420,7 +416,8 @@ def create_app() -> FastAPI:
             return templates.TemplateResponse(
                 request=request,
                 name="resolve_auto_relink_result.html",
-                context={"error": "No Notion key configured.", "resolved": 0, "skipped": 0, "results": []},
+                context={"error": "No Notion key configured.", "warning": "",
+                         "resolved": 0, "skipped": 0, "results": []},
             )
 
         client = NotionClient(notion_key)
@@ -450,7 +447,7 @@ def create_app() -> FastAPI:
         return templates.TemplateResponse(
             request=request,
             name="resolve_auto_relink_result.html",
-            context={"error": "", "resolved": resolved, "skipped": skipped, "results": results},
+            context={"error": "", "warning": warning, "resolved": resolved, "skipped": skipped, "results": results},
         )
 
     @app.get("/wizard/progress")
