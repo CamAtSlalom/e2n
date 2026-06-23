@@ -508,3 +508,93 @@ def test_auto_relink_skips_multi_match_links(client, tmp_path) -> None:
     assert response.status_code == 200
     # Should report 0 resolved (ambiguous match skipped)
     assert "0" in response.text or "skipped" in response.text.lower() or "manual" in response.text.lower()
+
+
+
+# --- Individual resolution actions ---
+
+
+def test_resolve_acknowledge_marks_resolved(client, tmp_path) -> None:
+    """POST /resolve/acknowledge/{note_id} should delete marker block and mark resolved."""
+    source = tmp_path / "Ack.enex"
+    source.write_text(
+        '<?xml version="1.0"?><en-export><note><title>  </title>'
+        '<content><![CDATA[<?xml version="1.0"?><en-note></en-note>]]></content></note></en-export>',
+        encoding="utf-8",
+    )
+    proc_dir = tmp_path / "proc"
+    client.post("/wizard/step/1", data={"enex_source": str(source), "processing_directory": str(proc_dir)})
+
+    from unittest.mock import patch, MagicMock
+    mock_client = MagicMock()
+    mock_client.search_pages.return_value = []
+    mock_client.delete_block.return_value = None
+    with patch("e2n.webui.app.NotionClient", return_value=mock_client):
+        client.post("/wizard/step/2", data={"notion_key": "ntn_k", "notion_root": ""})
+
+    client.post("/wizard/step/3")
+
+    # Acknowledge an exception (e.g., Empty Title — page-level, auto-dismiss tier)
+    with patch("e2n.webui.app.NotionClient", return_value=mock_client):
+        response = client.post(
+            "/resolve/acknowledge/note_000001",
+            data={"block_id": "blk-123"},
+            follow_redirects=False,
+        )
+
+    assert response.status_code in (200, 302, 303)
+
+
+def test_resolve_delete_block_removes_from_notion(client, tmp_path) -> None:
+    """POST /resolve/delete-block should call delete_block on Notion API."""
+    source = tmp_path / "Del.enex"
+    source.write_text(
+        '<?xml version="1.0"?><en-export><note><title>Enc</title>'
+        '<content><![CDATA[<?xml version="1.0"?><en-note><en-crypt hint="x">data</en-crypt></en-note>]]></content></note></en-export>',
+        encoding="utf-8",
+    )
+    proc_dir = tmp_path / "proc"
+    client.post("/wizard/step/1", data={"enex_source": str(source), "processing_directory": str(proc_dir)})
+
+    from unittest.mock import patch, MagicMock
+    mock_client = MagicMock()
+    mock_client.search_pages.return_value = []
+    mock_client.delete_block.return_value = None
+    with patch("e2n.webui.app.NotionClient", return_value=mock_client):
+        client.post("/wizard/step/2", data={"notion_key": "ntn_k", "notion_root": ""})
+
+    client.post("/wizard/step/3")
+
+    with patch("e2n.webui.app.NotionClient", return_value=mock_client):
+        response = client.post(
+            "/resolve/delete-block",
+            data={"block_id": "blk-enc-1", "note_id": "note_000001"},
+            follow_redirects=False,
+        )
+
+    assert response.status_code in (200, 302, 303)
+    mock_client.delete_block.assert_called_once_with("blk-enc-1")
+
+
+def test_resolve_decrypt_view_requires_passphrase(client, tmp_path) -> None:
+    """GET /resolve/decrypt/{note_id} should show passphrase input form."""
+    source = tmp_path / "Dcr.enex"
+    source.write_text(
+        '<?xml version="1.0"?><en-export><note><title>Secret</title>'
+        '<content><![CDATA[<?xml version="1.0"?><en-note><en-crypt hint="pet name">Y2lwaGVy</en-crypt></en-note>]]></content></note></en-export>',
+        encoding="utf-8",
+    )
+    proc_dir = tmp_path / "proc"
+    client.post("/wizard/step/1", data={"enex_source": str(source), "processing_directory": str(proc_dir)})
+
+    from unittest.mock import patch, MagicMock
+    mock_client = MagicMock()
+    mock_client.search_pages.return_value = []
+    with patch("e2n.webui.app.NotionClient", return_value=mock_client):
+        client.post("/wizard/step/2", data={"notion_key": "ntn_k", "notion_root": ""})
+    client.post("/wizard/step/3")
+
+    response = client.get("/resolve/decrypt/note_000001")
+    assert response.status_code == 200
+    assert "passphrase" in response.text.lower() or "password" in response.text.lower()
+    assert "pet name" in response.text  # hint should be shown

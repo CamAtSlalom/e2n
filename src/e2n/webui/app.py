@@ -450,6 +450,49 @@ def create_app() -> FastAPI:
             context={"error": "", "warning": warning, "resolved": resolved, "skipped": skipped, "results": results},
         )
 
+    # --- Individual resolution actions ---
+
+    @app.post("/resolve/acknowledge/{note_id}")
+    def resolve_acknowledge(request: Request, note_id: str, block_id: str = Form("")):
+        notion_key = _wizard_state.get("notion_key", "")
+        if notion_key and block_id:
+            client = NotionClient(notion_key)
+            client.delete_block(block_id)
+        return RedirectResponse(url="/resolve/", status_code=303)
+
+    @app.post("/resolve/delete-block")
+    def resolve_delete_block(request: Request, block_id: str = Form(...), note_id: str = Form("")):
+        notion_key = _wizard_state.get("notion_key", "")
+        if notion_key:
+            client = NotionClient(notion_key)
+            client.delete_block(block_id)
+        return RedirectResponse(url="/resolve/", status_code=303)
+
+    @app.get("/resolve/decrypt/{note_id}", response_class=HTMLResponse)
+    def resolve_decrypt_view(request: Request, note_id: str):
+        exceptions = _load_exceptions_from_processing()
+        note_exceptions = [e for e in exceptions if e["note_id"] == note_id]
+        # Find hint from the exception data or from the note file
+        hint = ""
+        proc_dir = Path(_wizard_state.get("processing_directory", "")).expanduser().resolve()
+        if proc_dir.exists():
+            for child in proc_dir.iterdir():
+                if not child.is_dir():
+                    continue
+                note_file = child / "notes" / f"{note_id}.enex"
+                if note_file.exists():
+                    content = note_file.read_text(encoding="utf-8")
+                    import re
+                    hint_match = re.search(r'hint="([^"]*)"', content)
+                    if hint_match:
+                        hint = hint_match.group(1)
+                    break
+        return templates.TemplateResponse(
+            request=request,
+            name="resolve_decrypt.html",
+            context={"note_id": note_id, "hint": hint, "exceptions": note_exceptions},
+        )
+
     @app.get("/wizard/progress")
     def wizard_progress():
         proc_dir = _wizard_state.get("processing_directory", "")
