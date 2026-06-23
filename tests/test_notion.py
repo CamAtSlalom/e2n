@@ -1078,3 +1078,66 @@ def test_delete_block_handles_already_deleted() -> None:
 
     # Should not raise — graceful handling of already-deleted blocks
     client.delete_block("block-gone")
+
+
+
+# --- exception-tracking: Wire exception row creation into import pipeline ---
+
+
+def test_execute_import_note_creates_exception_rows_for_evernote_links(tmp_path) -> None:
+    """When a note has evernote links, import should create exception rows in the exceptions DB."""
+    from unittest.mock import MagicMock, call
+    from e2n.notion import NotionClient
+    from e2n.state import OperationRecord
+    from e2n.cli import _execute_notion_operation
+    import json
+
+    note_file = tmp_path / "note_000001.enex"
+    note_file.write_text(
+        '<?xml version="1.0" encoding="utf-8"?>\n<en-export>\n'
+        '<note><title>Link Note</title>'
+        '<content><![CDATA[<?xml version="1.0"?><en-note>'
+        '<a href="evernote:///view/1/s/g/g/">Other Note</a>'
+        '</en-note>]]></content></note>\n</en-export>\n',
+        encoding="utf-8",
+    )
+    resources_dir = tmp_path / "resources"
+    resources_dir.mkdir()
+    (resources_dir / "manifest.json").write_text("{}", encoding="utf-8")
+
+    client = NotionClient.__new__(NotionClient)
+    mock_api = MagicMock()
+    client._sdk_client = mock_api
+    # pages.create called twice: once for the note page, once for the exception row
+    mock_api.pages.create.side_effect = [
+        {"id": "note-page-id", "url": "https://notion.so/note"},
+        {"id": "exc-row-id", "url": "https://notion.so/exc"},
+    ]
+
+    operation = OperationRecord(
+        operation_id=10,
+        run_id="run-1",
+        note_id="note_000001",
+        operation_type="import_note",
+        payload_json=json.dumps({
+            "database_id": "db-import",
+            "title": "Link Note",
+            "tags": [],
+            "note_file": str(note_file),
+            "resources_directory": str(resources_dir),
+            "exception_database_id": "exc-db-999",
+        }),
+        idempotency_key="note_000001:import_note:h1",
+        status="pending",
+        attempt_count=0,
+        next_retry_at=None,
+    )
+
+    result = _execute_notion_operation(client, operation)
+    assert result == "note-page-id"
+    # Should have 2 pages.create calls: note page + exception row
+    assert mock_api.pages.create.call_count == 2
+    exc_call = mock_api.pages.create.call_args_list[1]
+    exc_kwargs = exc_call[1]
+    assert exc_kwargs["parent"]["database_id"] == "exc-db-999"
+    assert "Evernote Link" in str(exc_kwargs["properties"]["Reason"])

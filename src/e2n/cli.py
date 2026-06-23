@@ -405,6 +405,27 @@ def _execute_import_note(notion: NotionClient, payload: dict) -> str:
         blocks=blocks,
     )
 
+    # Create exception rows for any issues found during block conversion
+    exception_database_id = payload.get("exception_database_id", "")
+    if _exceptions and exception_database_id:
+        from e2n.notion import create_exception_row as _create_exc_row
+
+        page_url = f"https://notion.so/{page_id.replace('-', '')}"
+        for exc in _exceptions:
+            reasons = exc.reasons if hasattr(exc, "reasons") else ("Unsupported Content",)
+            error_msg = exc.error_comment if hasattr(exc, "error_comment") else exc.marker_text
+            _create_exc_row(
+                notion,
+                exception_database_id=exception_database_id,
+                note_name=title,
+                reasons=tuple(str(r) for r in reasons),
+                error_message=error_msg,
+                source_file=str(payload.get("source_file", "")),
+                link_text=getattr(exc, "link_text", ""),
+                link_value=getattr(exc, "link_value", ""),
+                page_url=page_url,
+            )
+
     return page_id
 
 
