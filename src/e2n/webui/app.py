@@ -13,6 +13,7 @@ from fastapi.templating import Jinja2Templates
 
 from e2n.cli import run_notion_import
 from e2n.enex import extract_enex_notes
+from e2n.notion import NotionClient
 from e2n.state import ProcessingStateStore
 
 
@@ -163,8 +164,56 @@ def create_app() -> FastAPI:
         return templates.TemplateResponse(
             request=request,
             name="wizard_step2.html",
-            context={"error": ""},
+            context={"error": "", "success": ""},
         )
+
+    @app.post("/wizard/step/2", response_class=HTMLResponse)
+    def wizard_step_2_post(
+        request: Request,
+        notion_key: str = Form(...),
+        notion_root: str = Form(""),
+    ):
+        try:
+            client = NotionClient(notion_key)
+            client.search_pages()
+            _wizard_state["notion_key"] = notion_key
+            _wizard_state["notion_root"] = notion_root
+            _wizard_state["step2_complete"] = "true"
+            return templates.TemplateResponse(
+                request=request,
+                name="wizard_step2.html",
+                context={"error": "", "success": "Connected successfully."},
+            )
+        except Exception as exc:
+            return templates.TemplateResponse(
+                request=request,
+                name="wizard_step2.html",
+                context={"error": f"Connection failed: {exc}", "success": ""},
+            )
+
+    @app.get("/wizard/progress")
+    def wizard_progress():
+        proc_dir = _wizard_state.get("processing_directory", "")
+        if not proc_dir:
+            return {"status": "not_started", "total_notes": 0, "processed": 0, "current": ""}
+        proc_path = Path(proc_dir).expanduser().resolve()
+        # Scan for state.db files in processing subdirectories
+        total = 0
+        processed = 0
+        for child in proc_path.iterdir() if proc_path.exists() else []:
+            state_path = child / "state.db" if child.is_dir() else None
+            if state_path and state_path.exists():
+                store = ProcessingStateStore(state_path)
+                try:
+                    run_id = store.latest_run_id()
+                    if run_id:
+                        counts = store.count_operations_by_status(run_id)
+                        total += counts.get("pending", 0) + counts.get("committed", 0) + counts.get("failed", 0)
+                        processed += counts.get("committed", 0)
+                finally:
+                    store.close()
+        status = "complete" if total > 0 and processed == total else "in_progress" if processed > 0 else "not_started"
+        return {"status": status, "total_notes": total, "processed": processed, "current": ""}
 
     return app
 
