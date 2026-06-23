@@ -347,7 +347,65 @@ def _execute_notion_operation(notion: NotionClient, operation: OperationRecord) 
         )
         return page.page_id
 
+    if operation.operation_type == "import_note":
+        return _execute_import_note(notion, payload)
+
     raise ValueError(f"Unsupported operation type: {operation.operation_type}")
+
+
+def _execute_import_note(notion: NotionClient, payload: dict) -> str:
+    """Parse a note file, build Notion blocks, upload resources, and create the page."""
+    import json as _json
+    from e2n.enml import plan_enml_segments
+    from e2n.notion import segments_to_notion_blocks
+
+    note_file = Path(payload["note_file"])
+    resources_dir = Path(payload["resources_directory"])
+    database_id = str(payload["database_id"])
+    title = str(payload["title"])
+    tags = tuple(str(t) for t in payload.get("tags", []))
+
+    # Parse ENML content from the note file
+    from lxml import etree
+
+    tree = etree.parse(str(note_file), parser=etree.XMLParser(recover=True))
+    root = tree.getroot()
+    note_el = root.find("note") if root.tag != "note" else root
+    content_el = note_el.find("content") if note_el is not None else None
+    content_text = content_el.text or "" if content_el is not None else ""
+
+    # Plan segments
+    segments = plan_enml_segments(content_text)
+
+    # Load resource manifest and upload files
+    manifest_path = resources_dir / "manifest.json"
+    resource_manifest: dict[str, str] = {}
+    if manifest_path.exists():
+        resource_manifest = _json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    # Upload referenced resources and build resource_map (hash → url/upload_id)
+    resource_map: dict[str, str] = {}
+    for segment in segments:
+        if segment.kind == "resource" and segment.value and segment.value in resource_manifest:
+            local_path = Path(resource_manifest[segment.value])
+            if local_path.exists():
+                upload_id = notion.upload_file(local_path)
+                resource_map[segment.value] = upload_id
+
+    # Convert segments to Notion blocks
+    blocks, _exceptions = segments_to_notion_blocks(
+        segments, resource_map, note_id=payload.get("note_id", ""), note_title=title
+    )
+
+    # Create page with blocks (performance: first 100 in page create)
+    page_id = notion.import_note_blocks(
+        database_id=database_id,
+        title=title,
+        tags=tags,
+        blocks=blocks,
+    )
+
+    return page_id
 
 
 def main(argv: list[str] | None = None) -> int:
