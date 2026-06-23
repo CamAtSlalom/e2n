@@ -21,6 +21,11 @@ from e2n.notion import (
 )
 from e2n.state import ProcessingStateStore
 
+try:
+    from notion_client import Client as _NotionSDKClient
+except ImportError:
+    _NotionSDKClient = None  # type: ignore[assignment, misc]
+
 
 @dataclass(frozen=True)
 class RunCard:
@@ -170,18 +175,36 @@ def create_app() -> FastAPI:
         notion_key: str = Form(...),
         notion_root: str = Form(""),
     ):
-        try:
-            client = NotionClient(notion_key)
-            client.search_pages()
-            _wizard_state["notion_key"] = notion_key
-            _wizard_state["notion_root"] = notion_root
-            _wizard_state["step2_complete"] = "true"
-            return RedirectResponse(url="/wizard/step/3", status_code=303)
-        except Exception as exc:
+        if not notion_key.strip():
             return templates.TemplateResponse(
                 request=request,
                 name="wizard_step2.html",
-                context={"error": f"Connection failed: {exc}", "success": ""},
+                context={"error": "Notion key is required.", "success": ""},
+            )
+        if not notion_root.strip():
+            return templates.TemplateResponse(
+                request=request,
+                name="wizard_step2.html",
+                context={"error": "Notion root page is required.", "success": ""},
+            )
+        try:
+            # Quick validation: lightweight API call with 10s timeout
+            client = NotionClient(notion_key.strip())
+            client.search_pages(notion_root.strip())
+            _wizard_state["notion_key"] = notion_key.strip()
+            _wizard_state["notion_root"] = notion_root.strip()
+            _wizard_state["step2_complete"] = "true"
+            return RedirectResponse(url="/wizard/step/3", status_code=303)
+        except Exception as exc:
+            error_msg = str(exc)
+            if "unauthorized" in error_msg.lower() or "invalid" in error_msg.lower():
+                error_msg = "Invalid API key. Check your integration secret at notion.so/my-integrations."
+            elif "timeout" in error_msg.lower() or "connect" in error_msg.lower():
+                error_msg = "Connection timed out. Check your internet connection."
+            return templates.TemplateResponse(
+                request=request,
+                name="wizard_step2.html",
+                context={"error": f"Connection failed: {error_msg}", "success": ""},
             )
 
     @app.get("/wizard/step/3", response_class=HTMLResponse)
