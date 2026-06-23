@@ -140,3 +140,72 @@ def test_wizard_progress_endpoint_returns_json(client, tmp_path) -> None:
     data = response.json()
     assert "status" in data
     assert "total_notes" in data
+
+
+
+# --- Step 3: Extract trigger ---
+
+
+def test_wizard_step_3_triggers_extraction(client, tmp_path) -> None:
+    """POST /wizard/step/3 should run extraction and redirect to step 4."""
+    source = tmp_path / "Extract.enex"
+    source.write_text(
+        '<?xml version="1.0"?><en-export><note><title>Note1</title>'
+        '<content><![CDATA[<?xml version="1.0"?><en-note>hello</en-note>]]></content></note></en-export>',
+        encoding="utf-8",
+    )
+    proc_dir = tmp_path / "proc"
+
+    # Complete steps 1 and 2
+    client.post("/wizard/step/1", data={"enex_source": str(source), "processing_directory": str(proc_dir)})
+    from unittest.mock import patch, MagicMock
+    mock_client = MagicMock()
+    mock_client.search_pages.return_value = []
+    with patch("e2n.webui.app.NotionClient", return_value=mock_client):
+        client.post("/wizard/step/2", data={"notion_key": "ntn_test", "notion_root": ""})
+
+    # Trigger extraction
+    response = client.post("/wizard/step/3", follow_redirects=False)
+    assert response.status_code in (302, 303)
+    assert "step/4" in response.headers.get("location", "") or "step/3" in response.headers.get("location", "")
+
+    # Extraction should have created processing output
+    assert (proc_dir / "Extract" / "state.db").exists()
+    assert (proc_dir / "Extract" / "master.txt").exists()
+
+
+def test_wizard_step_3_blocked_without_step_2(client, tmp_path) -> None:
+    """GET /wizard/step/3 before step 2 complete should redirect."""
+    source = tmp_path / "T.enex"
+    source.write_text("<en-export></en-export>", encoding="utf-8")
+    client.post("/wizard/step/1", data={"enex_source": str(source), "processing_directory": str(tmp_path / "p")})
+
+    response = client.get("/wizard/step/3", follow_redirects=False)
+    assert response.status_code in (302, 303)
+
+
+# --- Step 4: Import trigger ---
+
+
+def test_wizard_step_4_shows_import_page(client, tmp_path) -> None:
+    """GET /wizard/step/4 (after extraction) should show import controls."""
+    source = tmp_path / "Imp.enex"
+    source.write_text(
+        '<?xml version="1.0"?><en-export><note><title>N</title>'
+        '<content><![CDATA[<?xml version="1.0"?><en-note>x</en-note>]]></content></note></en-export>',
+        encoding="utf-8",
+    )
+    proc_dir = tmp_path / "proc"
+
+    # Complete steps 1, 2, 3
+    client.post("/wizard/step/1", data={"enex_source": str(source), "processing_directory": str(proc_dir)})
+    from unittest.mock import patch, MagicMock
+    mock_client = MagicMock()
+    mock_client.search_pages.return_value = []
+    with patch("e2n.webui.app.NotionClient", return_value=mock_client):
+        client.post("/wizard/step/2", data={"notion_key": "ntn_test", "notion_root": ""})
+    client.post("/wizard/step/3")
+
+    response = client.get("/wizard/step/4")
+    assert response.status_code == 200
+    assert "import" in response.text.lower()

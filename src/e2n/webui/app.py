@@ -191,6 +191,43 @@ def create_app() -> FastAPI:
                 context={"error": f"Connection failed: {exc}", "success": ""},
             )
 
+    @app.get("/wizard/step/3", response_class=HTMLResponse)
+    def wizard_step_3(request: Request):
+        if _wizard_state.get("step2_complete") != "true":
+            return RedirectResponse(url="/wizard/step/2", status_code=303)
+        return templates.TemplateResponse(
+            request=request,
+            name="wizard_step3.html",
+            context={"error": ""},
+        )
+
+    @app.post("/wizard/step/3")
+    def wizard_step_3_post(request: Request):
+        if _wizard_state.get("step2_complete") != "true":
+            return RedirectResponse(url="/wizard/step/2", status_code=303)
+        try:
+            source = Path(_wizard_state["enex_source"])
+            proc_dir = Path(_wizard_state["processing_directory"])
+            extract_enex_notes(source, proc_dir)
+            _wizard_state["step3_complete"] = "true"
+            return RedirectResponse(url="/wizard/step/4", status_code=303)
+        except Exception as exc:
+            return templates.TemplateResponse(
+                request=request,
+                name="wizard_step3.html",
+                context={"error": str(exc)},
+            )
+
+    @app.get("/wizard/step/4", response_class=HTMLResponse)
+    def wizard_step_4(request: Request):
+        if _wizard_state.get("step3_complete") != "true":
+            return RedirectResponse(url="/wizard/step/3", status_code=303)
+        return templates.TemplateResponse(
+            request=request,
+            name="wizard_step4.html",
+            context={"error": ""},
+        )
+
     @app.get("/wizard/progress")
     def wizard_progress():
         proc_dir = _wizard_state.get("processing_directory", "")
