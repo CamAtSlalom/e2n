@@ -287,6 +287,14 @@ def create_app() -> FastAPI:
                         continue
                     notes = store.list_notes(run_id, status="extracted")
                     log.info("Found %d extracted notes for run %s", len(notes), run_id)
+
+                    # Load resource manifest for this source
+                    import json as _json
+                    manifest_path = output_dir / "resources" / "manifest.json"
+                    resource_manifest: dict[str, str] = {}
+                    if manifest_path.exists():
+                        resource_manifest = _json.loads(manifest_path.read_text(encoding="utf-8"))
+                    log.info("Resource manifest: %d entries", len(resource_manifest))
                     for note in notes:
                         note_file = output_dir / "notes" / f"{note.note_id}.enex"
                         if not note_file.exists():
@@ -302,7 +310,7 @@ def create_app() -> FastAPI:
 
                             segments = plan_enml_segments(content_text)
                             blocks, exceptions = segments_to_notion_blocks(
-                                segments, {}, note_id=note.note_id, note_title=note.title
+                                segments, resource_manifest, note_id=note.note_id, note_title=note.title
                             )
                             page_id = client.import_note_blocks(
                                 database_id=import_db.database_id,

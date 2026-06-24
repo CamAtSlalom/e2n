@@ -285,19 +285,28 @@ def segments_to_notion_blocks(
 
         elif kind == "resource":
             flush_inline()
-            url = resource_map.get(segment.value, "")
+            resource_ref = resource_map.get(segment.value, "")
             block_type = mime_to_notion_block_type(segment.mime_type)
             if block_type == "unsupported":
                 append_unsupported(segment, f"MIME type {segment.mime_type!r} is not supported by the Notion API")
-            elif not url:
-                # Resource was not uploaded yet; record as unsupported so nothing is silently dropped.
+            elif not resource_ref:
+                # Resource not in manifest at all — truly missing
                 append_unsupported(segment, f"{segment.mime_type or 'unknown'} resource not found in resource map")
-            elif block_type == "image":
-                blocks.append(image_block(url))
-            elif block_type == "pdf":
-                blocks.append(pdf_block(url))
+            elif resource_ref.startswith("http://") or resource_ref.startswith("https://"):
+                # Already an uploaded URL
+                if block_type == "image":
+                    blocks.append(image_block(resource_ref))
+                elif block_type == "pdf":
+                    blocks.append(pdf_block(resource_ref))
+                else:
+                    blocks.append(file_block(resource_ref))
             else:
-                blocks.append(file_block(url))
+                # Local file path — file upload not yet implemented, create placeholder
+                append_unsupported(
+                    segment,
+                    f"{segment.mime_type or 'file'} attachment available locally: {resource_ref}. "
+                    f"File upload to Notion not yet implemented — use resolution workbench to attach.",
+                )
 
         elif kind == "table":
             flush_inline()
