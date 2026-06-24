@@ -486,7 +486,7 @@ def create_app() -> FastAPI:
         return templates.TemplateResponse(
             request=request,
             name="resolve_dashboard.html",
-            context={"categories": categories, "pages": pages, "total": len(exceptions)},
+            context={"categories": categories, "pages": dict(sorted(pages.items(), key=lambda x: x[1]["count"], reverse=True)), "total": len(exceptions)},
         )
 
     @app.get("/resolve/type/{reason_slug}", response_class=HTMLResponse)
