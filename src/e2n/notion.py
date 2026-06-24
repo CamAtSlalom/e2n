@@ -416,13 +416,15 @@ class NotionClient:
         return _page_ref(self._sdk_call(self._sdk_client.pages.create, **body))
 
     def create_database(self, parent_page_id: str, title: str, properties: JsonObject) -> NotionDatabaseRef:
-        """Create a child database under a Notion page."""
+        """Create a child database under a Notion page with schema properties."""
         body = {
             "parent": {"type": "page_id", "page_id": parent_page_id},
             "title": [{"type": "text", "text": {"content": title}}],
             "properties": properties,
         }
-        return _database_ref(self._sdk_call(self._sdk_client.databases.create, **body))
+        # Use raw request because SDK 3.1.0 strips 'properties' from databases.create
+        response = self._sdk_call(self._sdk_client.request, path="databases", method="POST", body=body)
+        return _database_ref(response)
 
     def create_database_row(self, database_id: str, title: str, tags: tuple[str, ...] | list[str]) -> NotionPageRef:
         """Create one page row in an import database."""
