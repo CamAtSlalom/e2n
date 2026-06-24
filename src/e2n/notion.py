@@ -213,13 +213,17 @@ def segments_to_notion_blocks(
         kind = segment.kind
 
         if kind == "text":
-            if segment.annotations:
-                pending_inline.append(annotated_text_span(segment.text, segment.annotations))
-            else:
-                pending_inline.append(plain_text_span(segment.text))
+            if not segment.inline:
+                # Block-level text (from div/p boundary) — new paragraph
+                flush_inline()
+            if segment.text:
+                if segment.annotations:
+                    pending_inline.append(annotated_text_span(segment.text, segment.annotations))
+                else:
+                    pending_inline.append(plain_text_span(segment.text))
 
         elif kind == "http_link":
-            # Inline link annotation — stays within the surrounding paragraph run.
+            # Inline link annotation — stays within the current paragraph run.
             pending_inline.append(link_text_span(segment.text, segment.value))
 
         elif kind == "heading":
