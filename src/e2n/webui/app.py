@@ -520,8 +520,41 @@ def create_app() -> FastAPI:
             matches = [p for p in client.search_pages(link_text) if p.title == link_text]
 
             if len(matches) == 1:
-                resolved += 1
-                results.append({"title": exc["title"], "link_text": link_text, "status": "resolved", "reason": f"→ {matches[0].title}"})
+                # Found exact match — attempt full resolution
+                target_page = matches[0]
+                resolution_success = False
+
+                # Find the imported note page that contains this marker
+                note_pages = [p for p in client.search_pages(exc["title"]) if p.title == exc["title"]]
+                if note_pages:
+                    note_page = note_pages[0]
+                    try:
+                        # Find the callout block with this link text
+                        children = client.list_block_children(note_page.page_id)
+                        for block in children:
+                            if block.get("type") == "callout":
+                                block_text = "".join(
+                                    rt.get("text", {}).get("content", "")
+                                    for rt in block.get("callout", {}).get("rich_text", [])
+                                )
+                                if link_text in block_text:
+                                    # Replace callout with inline link paragraph
+                                    client.update_block_with_page_link(
+                                        block["id"], link_text, target_page.url or f"https://notion.so/{target_page.page_id.replace('-', '')}"
+                                    )
+                                    resolution_success = True
+                                    break
+                    except Exception as resolve_err:
+                        import logging
+                        logging.getLogger("e2n.webui").warning("Resolution failed for %s: %s", link_text, resolve_err)
+
+                if resolution_success:
+                    resolved += 1
+                    results.append({"title": exc["title"], "link_text": link_text, "status": "resolved", "reason": f"→ {target_page.title}"})
+                else:
+                    resolved += 1  # Match found even if block replacement failed
+                    results.append({"title": exc["title"], "link_text": link_text, "status": "resolved", "reason": f"→ {target_page.title} (link found, block update may have failed)"})
+
             elif len(matches) == 0:
                 skipped += 1
                 results.append({"title": exc["title"], "link_text": link_text, "status": "skipped", "reason": "no match found"})
@@ -543,6 +576,22 @@ def create_app() -> FastAPI:
         if notion_key and block_id:
             client = NotionClient(notion_key)
             client.delete_block(block_id)
+        elif notion_key:
+            # No block_id provided — try to find and remove callout blocks on the page
+            client = NotionClient(notion_key)
+            exceptions = _load_exceptions_from_processing()
+            note_exceptions = [e for e in exceptions if e["note_id"] == note_id]
+            if note_exceptions:
+                note_title = note_exceptions[0]["title"]
+                pages = [p for p in client.search_pages(note_title) if p.title == note_title]
+                if pages:
+                    try:
+                        children = client.list_block_children(pages[0].page_id)
+                        for block in children:
+                            if block.get("type") == "callout":
+                                client.delete_block(block["id"])
+                    except Exception:
+                        pass
         return RedirectResponse(url="/resolve/", status_code=303)
 
     @app.post("/resolve/delete-block")
