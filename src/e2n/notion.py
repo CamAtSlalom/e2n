@@ -422,9 +422,7 @@ class NotionClient:
             "title": [{"type": "text", "text": {"content": title}}],
             "properties": properties,
         }
-        # Use raw request because SDK 3.1.0 strips 'properties' from databases.create
-        response = self._sdk_call(self._sdk_client.request, path="databases", method="POST", body=body)
-        return _database_ref(response)
+        return _database_ref(self._api("databases", "POST", body))
 
     def create_database_row(self, database_id: str, title: str, tags: tuple[str, ...] | list[str]) -> NotionPageRef:
         """Create one page row in an import database."""
@@ -490,20 +488,9 @@ class NotionClient:
 
     def upload_file(self, file_path: "Path") -> str:
         """Upload a local file via Notion File Upload API and return the upload ID."""
-        # Step 1: Create upload object
-        create_response = self._sdk_call(
-            self._sdk_client.request, path="file_uploads", method="POST", body={}
-        )
+        create_response = self._api("file_uploads", "POST", {})
         upload_id = create_response["id"]
-
-        # Step 2: Send file contents
-        self._sdk_call(
-            self._sdk_client.request,
-            path=f"file_uploads/{upload_id}/send",
-            method="POST",
-            body={},
-            file=file_path,
-        )
+        self._api(f"file_uploads/{upload_id}/send", "POST", {})
         return upload_id
 
     def append_blocks_batched(self, page_id: str, blocks: list[JsonObject]) -> None:
@@ -567,6 +554,13 @@ class NotionClient:
             self._sdk_call(self._sdk_client.blocks.delete, block_id=block_id)
         except NotionAPIError:
             pass  # Block already deleted or not found — acceptable
+
+    def _api(self, path: str, method: str = "GET", body: JsonObject | None = None) -> JsonObject:
+        """Direct Notion API call bypassing SDK convenience method filters."""
+        kwargs: dict[str, Any] = {"path": path, "method": method}
+        if body is not None:
+            kwargs["body"] = body
+        return self._sdk_call(self._sdk_client.request, **kwargs)
 
     def _sdk_call(self, sdk_method: Any, **kwargs: Any) -> JsonObject:
         try:
