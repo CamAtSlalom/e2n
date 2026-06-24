@@ -528,6 +528,10 @@ def create_app() -> FastAPI:
         exceptions = _load_exceptions_from_processing()
         link_exceptions = [e for e in exceptions if "Evernote Link" in e["reasons"]]
 
+        import logging
+        relink_log = logging.getLogger("e2n.webui.relink")
+        relink_log.info("Auto-relink: found %d Evernote Link exceptions to process", len(link_exceptions))
+
         notion_key = _wizard_state.get("notion_key", "")
         if not notion_key:
             return templates.TemplateResponse(
@@ -550,6 +554,7 @@ def create_app() -> FastAPI:
                 continue
 
             matches = [p for p in client.search_pages(link_text) if p.title == link_text]
+            relink_log.info("  Link '%s': %d exact match(es)", link_text, len(matches))
 
             if len(matches) == 1:
                 # Found exact match — attempt full resolution
@@ -619,6 +624,7 @@ def create_app() -> FastAPI:
                 skipped += 1
                 results.append({"title": exc["title"], "link_text": link_text, "status": "skipped", "reason": f"{len(matches)} matches — manual review required"})
 
+        relink_log.info("Auto-relink complete: resolved=%d, skipped=%d", resolved, skipped)
         return templates.TemplateResponse(
             request=request,
             name="resolve_auto_relink_result.html",
