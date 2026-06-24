@@ -537,11 +537,13 @@ def create_app() -> FastAPI:
                 # Found exact match — attempt full resolution
                 target_page = matches[0]
                 resolution_success = False
+                resolved_block_url = ""
 
                 # Find the imported note page that contains this marker
                 note_pages = [p for p in client.search_pages(exc["title"]) if p.title == exc["title"]]
                 if note_pages:
                     note_page = note_pages[0]
+                    page_id_clean = note_page.page_id.replace("-", "")
                     try:
                         # Find the callout block with this link text
                         children = client.list_block_children(note_page.page_id)
@@ -556,18 +558,41 @@ def create_app() -> FastAPI:
                                     client.update_block_with_page_link(
                                         block["id"], link_text, target_page.url or f"https://notion.so/{target_page.page_id.replace('-', '')}"
                                     )
+                                    # The replaced block keeps the same ID — it's now the resolved content
+                                    block_id_clean = block["id"].replace("-", "")
+                                    resolved_block_url = f"https://www.notion.so/{page_id_clean}#{block_id_clean}"
                                     resolution_success = True
                                     break
                     except Exception as resolve_err:
                         import logging
                         logging.getLogger("e2n.webui").warning("Resolution failed for %s: %s", link_text, resolve_err)
 
+                # Update exception row: Status = Resolved, Link = resolved block
+                if resolution_success and note_pages:
+                    try:
+                        all_matches_exc = client.search_pages(exc["title"])
+                        for p in all_matches_exc:
+                            if p.title == exc["title"]:
+                                try:
+                                    update_props: dict = {"Status": {"select": {"name": "Resolved"}}}
+                                    if resolved_block_url:
+                                        update_props["Link"] = {"url": resolved_block_url}
+                                    client._sdk_call(
+                                        client._sdk_client.pages.update,
+                                        page_id=p.page_id,
+                                        properties=update_props,
+                                    )
+                                except Exception:
+                                    pass
+                    except Exception:
+                        pass
+
                 if resolution_success:
                     resolved += 1
                     results.append({"title": exc["title"], "link_text": link_text, "status": "resolved", "reason": f"→ {target_page.title}"})
                 else:
-                    resolved += 1  # Match found even if block replacement failed
-                    results.append({"title": exc["title"], "link_text": link_text, "status": "resolved", "reason": f"→ {target_page.title} (link found, block update may have failed)"})
+                    resolved += 1
+                    results.append({"title": exc["title"], "link_text": link_text, "status": "resolved", "reason": f"→ {target_page.title} (match found, block update may have failed)"})
 
             elif len(matches) == 0:
                 skipped += 1
@@ -609,20 +634,29 @@ def create_app() -> FastAPI:
                 except Exception:
                     pass
 
-        # 2. Update Import-Exceptions row(s) to Status = "Resolved"
+        # 2. Update Import-Exceptions row(s) to Status = "Resolved" with Link to resolved content
         if note_title:
             try:
+                # Build resolved link — points to the page (marker is deleted, page is clean)
+                resolved_url = ""
+                pages_found = [p for p in client.search_pages(note_title) if p.title == note_title]
+                if pages_found:
+                    resolved_url = pages_found[0].url or f"https://www.notion.so/{pages_found[0].page_id.replace('-', '')}"
+
                 all_matches = client.search_pages(note_title)
                 for p in all_matches:
                     if p.title == note_title:
                         try:
+                            update_props: dict = {"Status": {"select": {"name": "Resolved"}}}
+                            if resolved_url:
+                                update_props["Link"] = {"url": resolved_url}
                             client._sdk_call(
                                 client._sdk_client.pages.update,
                                 page_id=p.page_id,
-                                properties={"Status": {"select": {"name": "Resolved"}}},
+                                properties=update_props,
                             )
                         except Exception:
-                            pass  # Page might not have Status property (imported page vs exception row)
+                            pass
             except Exception:
                 pass
 
