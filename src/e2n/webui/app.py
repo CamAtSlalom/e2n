@@ -309,8 +309,22 @@ def create_app() -> FastAPI:
                             content_text = content_el.text or "" if content_el is not None else ""
 
                             segments = plan_enml_segments(content_text)
+
+                            # Upload resources referenced by this note
+                            from pathlib import Path as _P
+                            note_resource_map: dict[str, str] = {}
+                            for seg in segments:
+                                if seg.kind == "resource" and seg.value and seg.value in resource_manifest:
+                                    local_path = _P(resource_manifest[seg.value])
+                                    if local_path.exists() and seg.value not in note_resource_map:
+                                        try:
+                                            upload_id = client.upload_file(local_path)
+                                            note_resource_map[seg.value] = f"upload:{upload_id}"
+                                        except Exception as upload_err:
+                                            log.warning("Upload failed for %s: %s", local_path.name, upload_err)
+
                             blocks, exceptions = segments_to_notion_blocks(
-                                segments, resource_manifest, note_id=note.note_id, note_title=note.title
+                                segments, note_resource_map, note_id=note.note_id, note_title=note.title
                             )
                             page_id = client.import_note_blocks(
                                 database_id=import_db.database_id,

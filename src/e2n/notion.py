@@ -88,14 +88,32 @@ def image_block(url: str) -> JsonObject:
     return {"object": "block", "type": "image", "image": {"type": "external", "external": {"url": url}}}
 
 
+def image_block_upload(upload_id: str) -> JsonObject:
+    """Build a Notion image block from a file upload ID."""
+    return {"object": "block", "type": "image", "image": {"type": "file_upload", "file_upload": {"id": upload_id}}}
+
+
 def pdf_block(url: str) -> JsonObject:
     """Build a Notion pdf block referencing an external or uploaded URL."""
     return {"object": "block", "type": "pdf", "pdf": {"type": "external", "external": {"url": url}}}
 
 
+def pdf_block_upload(upload_id: str) -> JsonObject:
+    """Build a Notion pdf block from a file upload ID."""
+    return {"object": "block", "type": "pdf", "pdf": {"type": "file_upload", "file_upload": {"id": upload_id}}}
+
+
 def file_block(url: str, filename: str = "") -> JsonObject:
     """Build a Notion file block for a generic attachment."""
     payload: JsonObject = {"object": "block", "type": "file", "file": {"type": "external", "external": {"url": url}}}
+    if filename:
+        payload["file"]["name"] = filename
+    return payload
+
+
+def file_block_upload(upload_id: str, filename: str = "") -> JsonObject:
+    """Build a Notion file block from a file upload ID."""
+    payload: JsonObject = {"object": "block", "type": "file", "file": {"type": "file_upload", "file_upload": {"id": upload_id}}}
     if filename:
         payload["file"]["name"] = filename
     return payload
@@ -292,8 +310,17 @@ def segments_to_notion_blocks(
             elif not resource_ref:
                 # Resource not in manifest at all — truly missing
                 append_unsupported(segment, f"{segment.mime_type or 'unknown'} resource not found in resource map")
+            elif resource_ref.startswith("upload:"):
+                # File was uploaded — use file_upload block type
+                upload_id = resource_ref[7:]  # Strip "upload:" prefix
+                if block_type == "image":
+                    blocks.append(image_block_upload(upload_id))
+                elif block_type == "pdf":
+                    blocks.append(pdf_block_upload(upload_id))
+                else:
+                    blocks.append(file_block_upload(upload_id))
             elif resource_ref.startswith("http://") or resource_ref.startswith("https://"):
-                # Already an uploaded URL
+                # External URL
                 if block_type == "image":
                     blocks.append(image_block(resource_ref))
                 elif block_type == "pdf":
@@ -301,11 +328,11 @@ def segments_to_notion_blocks(
                 else:
                     blocks.append(file_block(resource_ref))
             else:
-                # Local file path — file upload not yet implemented, create placeholder
+                # Local file path — upload failed or not attempted
                 append_unsupported(
                     segment,
                     f"{segment.mime_type or 'file'} attachment available locally: {resource_ref}. "
-                    f"File upload to Notion not yet implemented — use resolution workbench to attach.",
+                    f"Use resolution workbench to upload.",
                 )
 
         elif kind == "table":
@@ -496,10 +523,31 @@ class NotionClient:
         return self._sdk_call(self._sdk_client.blocks.update, block_id=block_id, **body)
 
     def upload_file(self, file_path: "Path") -> str:
-        """Upload a local file via Notion File Upload API and return the upload ID."""
+        """Upload a local file via Notion File Upload API and return the upload ID.
+
+        Two-step process: create upload object, then send file contents.
+        """
+        from pathlib import Path as _Path
+        local_path = _Path(file_path)
+        if not local_path.exists():
+            raise NotionAPIError(f"File not found: {file_path}")
+
+        # Step 1: Create upload object
         create_response = self._api("file_uploads", "POST", {})
         upload_id = create_response["id"]
-        self._api(f"file_uploads/{upload_id}/send", "POST", {})
+
+        # Step 2: Send file contents via form_data
+        import mimetypes
+        content_type = mimetypes.guess_type(str(local_path))[0] or "application/octet-stream"
+        file_data = local_path.read_bytes()
+
+        # Use SDK's form_data support for multipart upload
+        self._sdk_call(
+            self._sdk_client.request,
+            path=f"file_uploads/{upload_id}/send",
+            method="POST",
+            form_data={"file": (local_path.name, file_data, content_type)},
+        )
         return upload_id
 
     def append_blocks_batched(self, page_id: str, blocks: list[JsonObject]) -> None:
