@@ -938,6 +938,32 @@ def create_app() -> FastAPI:
                 pass
         return RedirectResponse(url="/resolve/", status_code=303)
 
+    @app.get("/wizard/status", response_class=HTMLResponse)
+    def wizard_status(request: Request):
+        proc_dir = Path(_wizard_state.get("processing_directory", "")).expanduser().resolve()
+        notes_extracted = int(_wizard_state.get("extracted_count", "0"))
+        step = "Not started"
+        if _wizard_state.get("step4_complete") == "true":
+            step = "Import complete — review exceptions"
+        elif _wizard_state.get("step3_complete") == "true":
+            step = "Extraction complete — ready to import"
+        elif _wizard_state.get("step2_complete") == "true":
+            step = "Connected to Notion — ready to extract"
+        elif _wizard_state.get("step1_complete") == "true":
+            step = "Source configured — connecting to Notion"
+        exceptions = _load_exceptions_from_processing()
+        return templates.TemplateResponse(
+            request=request,
+            name="wizard_status.html",
+            context={
+                "step": step,
+                "notes_extracted": notes_extracted,
+                "exception_count": len(exceptions),
+                "source": _wizard_state.get("enex_source", ""),
+                "processing_dir": _wizard_state.get("processing_directory", ""),
+            },
+        )
+
     @app.get("/wizard/progress")
     def wizard_progress():
         proc_dir = _wizard_state.get("processing_directory", "")
