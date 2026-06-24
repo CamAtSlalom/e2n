@@ -607,7 +607,7 @@ def exception_database_properties() -> JsonObject:
     return {
         "Note Name": {"title": {}},
         EXCEPTION_KEY_PROPERTY: {"rich_text": {}},
-        EXCEPTION_STATUS_PROPERTY: {"select": {"options": [{"name": "Open"}, {"name": "Closed"}]}},
+        EXCEPTION_STATUS_PROPERTY: {"select": {"options": [{"name": "Open"}, {"name": "Resolved"}, {"name": "Closed"}]}},
         "Link": {"url": {}},
         EXCEPTION_REASON_PROPERTY: {"multi_select": {}},
         "Error Message": {"rich_text": {}},
