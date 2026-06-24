@@ -799,8 +799,23 @@ def create_exception_row(
         "parent": {"database_id": exception_database_id},
         "properties": properties,
     }
-    response = client._sdk_call(client._sdk_client.pages.create, **body)
-    return response["id"]
+
+    try:
+        response = client._sdk_call(client._sdk_client.pages.create, **body)
+        return response["id"]
+    except NotionAPIError as exc:
+        if "not a property that exists" in str(exc):
+            # Fallback: create with just the title (schema may not be set up)
+            fallback_body: JsonObject = {
+                "parent": {"database_id": exception_database_id},
+                "properties": {"title": {"title": [{"text": {"content": note_name}}]}},
+            }
+            try:
+                response = client._sdk_call(client._sdk_client.pages.create, **fallback_body)
+                return response["id"]
+            except Exception:
+                pass
+        raise
 
 
 def _select_root_page(pages: list[NotionPageRef], root_title: str | None) -> NotionPageRef | None:
