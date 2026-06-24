@@ -776,20 +776,47 @@ def create_app() -> FastAPI:
                 context={"note_id": note_id, "hint": hint, "error": "No encrypted content found.", "decrypted": ""},
             )
 
-        # Attempt decryption
+        # Attempt decryption — Evernote ENC0 format:
+        # Bytes: "ENC0"(4) + salt(16) + salthmac(16) + IV(16) + ciphertext + HMAC(32)
+        # Key: PBKDF2(passphrase, salt, 50000 iterations, SHA-256) → 128-bit key
         try:
             from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-            from cryptography.hazmat.primitives import padding
+            from cryptography.hazmat.primitives import padding, hashes
+            from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+            import hmac as _hmac
 
             raw = _b64.b64decode(encrypted_b64)
-            key = _hashlib.md5(passphrase.encode("utf-8")).digest()[:key_length // 8]
-            iv = raw[:16]
-            ciphertext = raw[16:]
 
+            # Parse ENC0 format
+            header = raw[0:4]  # b"ENC0"
+            salt = raw[4:20]
+            salthmac = raw[20:36]
+            iv = raw[36:52]
+            ciphertext = raw[52:-32]
+            stored_hmac = raw[-32:]
+            body = raw[0:-32]
+
+            # Verify HMAC (confirms correct passphrase)
+            kdf_hmac = PBKDF2HMAC(algorithm=hashes.SHA256(), length=key_length // 8, salt=salthmac, iterations=50000)
+            key_hmac = kdf_hmac.derive(passphrase.encode("utf-8"))
+            computed_hmac = _hmac.new(key_hmac, body, "sha256").digest()
+            if not _hmac.compare_digest(computed_hmac, stored_hmac):
+                return templates.TemplateResponse(
+                    request=request,
+                    name="resolve_decrypt_result.html",
+                    context={"note_id": note_id, "hint": hint, "error": "Wrong passphrase.", "decrypted": ""},
+                )
+
+            # Derive decryption key
+            kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=key_length // 8, salt=salt, iterations=50000)
+            key = kdf.derive(passphrase.encode("utf-8"))
+
+            # Decrypt
             cipher = Cipher(algorithms.AES(key), modes.CBC(iv))
             decryptor = cipher.decryptor()
             padded = decryptor.update(ciphertext) + decryptor.finalize()
 
+            # Remove PKCS7 padding
             unpadder = padding.PKCS7(128).unpadder()
             decrypted_bytes = unpadder.update(padded) + unpadder.finalize()
             decrypted_text = decrypted_bytes.decode("utf-8")
@@ -799,11 +826,14 @@ def create_app() -> FastAPI:
                 name="resolve_decrypt_result.html",
                 context={"note_id": note_id, "hint": hint, "error": "", "decrypted": decrypted_text},
             )
-        except Exception:
+        except Exception as exc:
+            error_msg = str(exc)
+            if "wrong passphrase" in error_msg.lower() or "padding" in error_msg.lower():
+                error_msg = "Decryption failed — wrong passphrase or corrupted data."
             return templates.TemplateResponse(
                 request=request,
                 name="resolve_decrypt_result.html",
-                context={"note_id": note_id, "hint": hint, "error": "Decryption failed — wrong passphrase or corrupted data.", "decrypted": ""},
+                context={"note_id": note_id, "hint": hint, "error": f"Decryption failed: {error_msg}", "decrypted": ""},
             )
 
     @app.post("/resolve/decrypt-import/{note_id}")
@@ -852,12 +882,16 @@ def create_app() -> FastAPI:
 
         try:
             from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-            from cryptography.hazmat.primitives import padding
+            from cryptography.hazmat.primitives import padding, hashes
+            from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
             raw = _b64.b64decode(encrypted_b64)
-            key = _hashlib.md5(passphrase.encode("utf-8")).digest()[:key_length // 8]
-            iv = raw[:16]
-            ciphertext = raw[16:]
+            salt = raw[4:20]
+            iv = raw[36:52]
+            ciphertext = raw[52:-32]
+
+            kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=key_length // 8, salt=salt, iterations=50000)
+            key = kdf.derive(passphrase.encode("utf-8"))
 
             cipher = Cipher(algorithms.AES(key), modes.CBC(iv))
             decryptor = cipher.decryptor()
