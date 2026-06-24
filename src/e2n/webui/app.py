@@ -872,6 +872,18 @@ def create_app() -> FastAPI:
             if pages:
                 try:
                     client.archive_page(pages[0].page_id)
+                    # Update exception row: Resolved, Link cleared (page deleted)
+                    all_matches = client.search_pages(exc["title"])
+                    for p in all_matches:
+                        if p.title == exc["title"]:
+                            try:
+                                client._sdk_call(
+                                    client._sdk_client.pages.update,
+                                    page_id=p.page_id,
+                                    properties={"Status": {"select": {"name": "Resolved"}}, "Link": {"url": None}},
+                                )
+                            except Exception:
+                                pass
                     deleted += 1
                 except Exception:
                     pass
