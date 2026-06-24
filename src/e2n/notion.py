@@ -69,7 +69,11 @@ def plain_text_span(text: str) -> JsonObject:
 
 def link_text_span(text: str, url: str) -> JsonObject:
     """Build a Notion rich_text element carrying an inline link annotation."""
-    return {"type": "text", "text": {"content": text, "link": {"url": url}}}
+    # Validate URL — Notion requires absolute URLs with valid protocol
+    if url and (url.startswith("http://") or url.startswith("https://") or url.startswith("mailto:")):
+        return {"type": "text", "text": {"content": text, "link": {"url": url}}}
+    # Invalid or relative URL — render as plain text
+    return {"type": "text", "text": {"content": f"{text} ({url})" if url else text}}
 
 
 def paragraph_block(rich_text: list[JsonObject]) -> JsonObject:
