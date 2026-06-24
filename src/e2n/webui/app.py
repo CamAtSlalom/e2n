@@ -379,6 +379,9 @@ def create_app() -> FastAPI:
                                     exc_url = f"https://www.notion.so/{page_id_clean}"
                                 reasons = exc.reasons if hasattr(exc, "reasons") else ("Unsupported Content",)
                                 error_msg = exc.error_comment if hasattr(exc, "error_comment") else getattr(exc, "marker_text", "")
+                                # Detect encrypted content → use "Encrypted" reason
+                                if "Encrypted content" in error_msg:
+                                    reasons = ("Encrypted",)
                                 try:
                                     create_exception_row(
                                         client,
@@ -473,10 +476,13 @@ def create_app() -> FastAPI:
                 reason = reason.strip()
                 if reason:
                     categories[reason] = categories.get(reason, 0) + 1
-        # Group by note for "by page" view
-        pages: dict[str, int] = {}
+        # Group by note for "by page" view — store title + count
+        pages: dict[str, dict] = {}
         for exc in exceptions:
-            pages[exc["note_id"]] = pages.get(exc["note_id"], 0) + 1
+            nid = exc["note_id"]
+            if nid not in pages:
+                pages[nid] = {"title": exc["title"], "count": 0}
+            pages[nid]["count"] += 1
         return templates.TemplateResponse(
             request=request,
             name="resolve_dashboard.html",
