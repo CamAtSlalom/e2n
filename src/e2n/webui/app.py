@@ -573,25 +573,45 @@ def create_app() -> FastAPI:
     @app.post("/resolve/acknowledge/{note_id}")
     def resolve_acknowledge(request: Request, note_id: str, block_id: str = Form("")):
         notion_key = _wizard_state.get("notion_key", "")
-        if notion_key and block_id:
-            client = NotionClient(notion_key)
+        if not notion_key:
+            return RedirectResponse(url="/resolve/", status_code=303)
+
+        client = NotionClient(notion_key)
+        exceptions = _load_exceptions_from_processing()
+        note_exceptions = [e for e in exceptions if e["note_id"] == note_id]
+        note_title = note_exceptions[0]["title"] if note_exceptions else ""
+
+        # 1. Delete callout marker(s) from the imported page
+        if block_id:
             client.delete_block(block_id)
-        elif notion_key:
-            # No block_id provided — try to find and remove callout blocks on the page
-            client = NotionClient(notion_key)
-            exceptions = _load_exceptions_from_processing()
-            note_exceptions = [e for e in exceptions if e["note_id"] == note_id]
-            if note_exceptions:
-                note_title = note_exceptions[0]["title"]
-                pages = [p for p in client.search_pages(note_title) if p.title == note_title]
-                if pages:
-                    try:
-                        children = client.list_block_children(pages[0].page_id)
-                        for block in children:
-                            if block.get("type") == "callout":
-                                client.delete_block(block["id"])
-                    except Exception:
-                        pass
+        elif note_title:
+            pages = [p for p in client.search_pages(note_title) if p.title == note_title]
+            if pages:
+                try:
+                    children = client.list_block_children(pages[0].page_id)
+                    for block in children:
+                        if block.get("type") == "callout":
+                            client.delete_block(block["id"])
+                except Exception:
+                    pass
+
+        # 2. Update Import-Exceptions row(s) to Status = "Resolved"
+        if note_title:
+            try:
+                all_matches = client.search_pages(note_title)
+                for p in all_matches:
+                    if p.title == note_title:
+                        try:
+                            client._sdk_call(
+                                client._sdk_client.pages.update,
+                                page_id=p.page_id,
+                                properties={"Status": {"select": {"name": "Resolved"}}},
+                            )
+                        except Exception:
+                            pass  # Page might not have Status property (imported page vs exception row)
+            except Exception:
+                pass
+
         return RedirectResponse(url="/resolve/", status_code=303)
 
     @app.post("/resolve/delete-block")
