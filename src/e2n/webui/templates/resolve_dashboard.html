@@ -7,8 +7,11 @@
 
 {% if total > 0 %}
 <h2>Actions</h2>
-<form method="post" action="/resolve/auto-relink" style="display:inline" onsubmit="this.querySelector('button').disabled=true;this.querySelector('button').textContent='Resolving...';">
+<form method="post" action="/resolve/auto-relink" style="display:inline; margin-right:1em;" onsubmit="this.querySelector('button').disabled=true;this.querySelector('button').textContent='Resolving...';">
   <button type="submit">Auto-Relink Evernote Links →</button>
+</form>
+<form method="post" action="/resolve/delete-empty-pages" style="display:inline; margin-right:1em;" onsubmit="this.querySelector('button').disabled=true;this.querySelector('button').textContent='Deleting...';">
+  <button type="submit">Delete Empty Pages →</button>
 </form>
 {% endif %}
 

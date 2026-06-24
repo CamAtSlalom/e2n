@@ -787,6 +787,53 @@ def create_app() -> FastAPI:
 
         return RedirectResponse(url="/resolve/", status_code=303)
 
+    # --- Trivial resolution routes ---
+
+    @app.post("/resolve/delete-empty-pages")
+    def resolve_delete_empty_pages(request: Request):
+        """Batch delete all empty pages (No Content exceptions) from Notion."""
+        notion_key = _wizard_state.get("notion_key", "")
+        if not notion_key:
+            return RedirectResponse(url="/resolve/", status_code=303)
+        client = NotionClient(notion_key)
+        exceptions = _load_exceptions_from_processing()
+        empty = [e for e in exceptions if "No Content" in e["reasons"]]
+        deleted = 0
+        for exc in empty:
+            pages = [p for p in client.search_pages(exc["title"]) if p.title == exc["title"]]
+            if pages:
+                try:
+                    client.archive_page(pages[0].page_id)
+                    deleted += 1
+                except Exception:
+                    pass
+        return templates.TemplateResponse(
+            request=request,
+            name="resolve_auto_relink_result.html",
+            context={"error": "", "warning": "", "resolved": deleted, "skipped": len(empty) - deleted,
+                     "results": [{"title": e["title"], "link_text": "", "status": "deleted", "reason": "empty page removed"} for e in empty[:deleted]]},
+        )
+
+    @app.post("/resolve/rename-page")
+    def resolve_rename_page(request: Request, note_id: str = Form(""), new_title: str = Form("")):
+        """Rename an 'Empty Title' page in Notion."""
+        notion_key = _wizard_state.get("notion_key", "")
+        if not notion_key or not new_title.strip():
+            return RedirectResponse(url="/resolve/", status_code=303)
+        client = NotionClient(notion_key)
+        # Find the page with "Empty Title"
+        pages = [p for p in client.search_pages("Empty Title") if p.title == "Empty Title"]
+        if pages:
+            try:
+                client._sdk_call(
+                    client._sdk_client.pages.update,
+                    page_id=pages[0].page_id,
+                    properties={"Name": {"title": [{"text": {"content": new_title.strip()}}]}},
+                )
+            except Exception:
+                pass
+        return RedirectResponse(url="/resolve/", status_code=303)
+
     @app.get("/wizard/progress")
     def wizard_progress():
         proc_dir = _wizard_state.get("processing_directory", "")

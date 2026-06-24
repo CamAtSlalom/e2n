@@ -17,6 +17,14 @@
           <em>Auto-relink or manual</em>
         {% elif "Encrypted" in (exc.error_message or "") or "Encrypted" in exc.reasons %}
           <a href="/resolve/decrypt/{{ exc.note_id }}">Decrypt</a>
+        {% elif "Empty Title" in exc.reasons %}
+          <form method="post" action="/resolve/rename-page" style="display:inline">
+            <input type="hidden" name="note_id" value="{{ exc.note_id }}">
+            <input type="text" name="new_title" placeholder="New title" size="20" required>
+            <button type="submit">Rename</button>
+          </form>
+        {% elif "No Content" in exc.reasons %}
+          <em>Use "Delete Empty Pages" above</em>
         {% else %}
           <form method="post" action="/resolve/acknowledge/{{ exc.note_id }}" style="display:inline">
             <input type="hidden" name="block_id" value="">
