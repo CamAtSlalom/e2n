@@ -324,6 +324,17 @@ def create_app() -> FastAPI:
                             log.error("Failed to import note %s (%s): %s", note.note_id, note.title, note_err)
                             continue
 
+                        # Append import-time exceptions to exceptions.txt for unified tracking
+                        if exceptions:
+                            exc_file = output_dir / "exceptions.txt"
+                            with exc_file.open("a", encoding="utf-8") as ef:
+                                for exc in exceptions:
+                                    reasons = ",".join(str(r) for r in (exc.reasons if hasattr(exc, "reasons") else ("Unsupported Content",)))
+                                    error_msg = exc.error_comment if hasattr(exc, "error_comment") else getattr(exc, "marker_text", "")
+                                    link_text = getattr(exc, "link_text", "")
+                                    link_value = getattr(exc, "link_value", "")
+                                    ef.write(f"{note.note_id}\t{note.title}\t{reasons}\t{src.name}\t\t{link_text}\t{link_value}\t{error_msg}\n")
+
                         # Create exception rows for any issues found
                         if exceptions:
                             from e2n.notion import create_exception_row
@@ -422,6 +433,7 @@ def create_app() -> FastAPI:
                         "block_url": parts[4] if len(parts) > 4 else "",
                         "link_text": parts[5] if len(parts) > 5 else "",
                         "link_value": parts[6] if len(parts) > 6 else "",
+                        "error_message": parts[7] if len(parts) > 7 else "",
                     })
         return exceptions
 

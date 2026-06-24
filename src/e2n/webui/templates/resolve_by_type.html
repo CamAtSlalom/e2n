@@ -5,14 +5,25 @@
 <h1>{{ reason }} Exceptions</h1>
 <p>{{ exceptions | length }} item(s)</p>
 <table>
-  <thead><tr><th>Note</th><th>Title</th><th>Link Text</th><th>Link Value</th></tr></thead>
+  <thead><tr><th>Note</th><th>Title</th><th>Detail</th><th>Action</th></tr></thead>
   <tbody>
   {% for exc in exceptions %}
     <tr>
       <td>{{ exc.note_id }}</td>
       <td>{{ exc.title }}</td>
-      <td>{{ exc.link_text }}</td>
-      <td>{{ exc.link_value }}</td>
+      <td>{{ exc.link_text or exc.error_message or exc.link_value }}</td>
+      <td>
+        {% if "Evernote Link" in exc.reasons %}
+          <em>Auto-relink or manual</em>
+        {% elif "Encrypted" in (exc.error_message or "") or "Encrypted" in exc.reasons %}
+          <a href="/resolve/decrypt/{{ exc.note_id }}">Decrypt</a>
+        {% else %}
+          <form method="post" action="/resolve/acknowledge/{{ exc.note_id }}" style="display:inline">
+            <input type="hidden" name="block_id" value="">
+            <button type="submit">Acknowledge</button>
+          </form>
+        {% endif %}
+      </td>
     </tr>
   {% endfor %}
   </tbody>
