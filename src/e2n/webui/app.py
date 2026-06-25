@@ -589,7 +589,7 @@ def create_app() -> FastAPI:
 
     @app.get("/resolve/", response_class=HTMLResponse)
     def resolve_dashboard(request: Request):
-        exceptions = _load_exceptions_from_processing()
+        exceptions = _load_exceptions_from_notion() or _load_exceptions_from_processing()
         # Group by reason category
         categories: dict[str, int] = {}
         for exc in exceptions:
@@ -612,7 +612,7 @@ def create_app() -> FastAPI:
 
     @app.get("/resolve/type/{reason_slug}", response_class=HTMLResponse)
     def resolve_by_type(request: Request, reason_slug: str):
-        exceptions = _load_exceptions_from_processing()
+        exceptions = _load_exceptions_from_notion() or _load_exceptions_from_processing()
         # Map slug to reason (e.g., "evernote-link" → "Evernote Link")
         reason_map = {
             "evernote-link": "Evernote Link",
@@ -631,7 +631,7 @@ def create_app() -> FastAPI:
 
     @app.get("/resolve/page/{note_id}", response_class=HTMLResponse)
     def resolve_by_page(request: Request, note_id: str):
-        exceptions = _load_exceptions_from_processing()
+        exceptions = _load_exceptions_from_notion() or _load_exceptions_from_processing()
         filtered = [e for e in exceptions if e["note_id"] == note_id]
         return templates.TemplateResponse(
             request=request,
@@ -646,7 +646,7 @@ def create_app() -> FastAPI:
         if _wizard_state.get("step4_complete") != "true":
             warning = "Not all imports are complete. Some links may not resolve until all sources are imported."
 
-        exceptions = _load_exceptions_from_processing()
+        exceptions = _load_exceptions_from_notion() or _load_exceptions_from_processing()
         link_exceptions = [e for e in exceptions if "Evernote Link" in e["reasons"]]
 
         import logging
@@ -761,7 +761,7 @@ def create_app() -> FastAPI:
             return RedirectResponse(url="/resolve/", status_code=303)
 
         client = NotionClient(notion_key)
-        exceptions = _load_exceptions_from_processing()
+        exceptions = _load_exceptions_from_notion() or _load_exceptions_from_processing()
         note_exceptions = [e for e in exceptions if e["note_id"] == note_id]
         note_title = note_exceptions[0]["title"] if note_exceptions else ""
 
@@ -816,7 +816,7 @@ def create_app() -> FastAPI:
                 client.delete_block(block_id)
             elif note_id:
                 # Look up by note_id — find the page and delete callout blocks
-                exceptions = _load_exceptions_from_processing()
+                exceptions = _load_exceptions_from_notion() or _load_exceptions_from_processing()
                 note_exc = [e for e in exceptions if e["note_id"] == note_id]
                 note_title = note_exc[0]["title"] if note_exc else ""
                 if note_title:
@@ -833,7 +833,7 @@ def create_app() -> FastAPI:
 
     @app.get("/resolve/decrypt/{note_id}", response_class=HTMLResponse)
     def resolve_decrypt_view(request: Request, note_id: str):
-        exceptions = _load_exceptions_from_processing()
+        exceptions = _load_exceptions_from_notion() or _load_exceptions_from_processing()
         note_exceptions = [e for e in exceptions if e["note_id"] == note_id]
         hint = ""
         proc_dir = Path(_wizard_state.get("processing_directory", "")).expanduser().resolve()
@@ -969,7 +969,7 @@ def create_app() -> FastAPI:
             if notion_key:
                 try:
                     resolve_client = NotionClient(notion_key)
-                    exceptions = _load_exceptions_from_processing()
+                    exceptions = _load_exceptions_from_notion() or _load_exceptions_from_processing()
                     note_exc = [e for e in exceptions if e["note_id"] == note_id]
                     note_title = note_exc[0]["title"] if note_exc else ""
                     if note_title:
@@ -1077,7 +1077,7 @@ def create_app() -> FastAPI:
 
             # If we don't have page_id/block_id from form, look them up
             if not page_id or not block_id:
-                exceptions = _load_exceptions_from_processing()
+                exceptions = _load_exceptions_from_notion() or _load_exceptions_from_processing()
                 note_exc = [e for e in exceptions if e["note_id"] == note_id]
                 note_title = note_exc[0]["title"] if note_exc else ""
                 if note_title:
@@ -1111,7 +1111,7 @@ def create_app() -> FastAPI:
                 block_id_clean = block_id.replace("-", "")
                 resolved_url = f"https://www.notion.so/{page_id_clean}#{block_id_clean}"
                 try:
-                    exceptions = _load_exceptions_from_processing()
+                    exceptions = _load_exceptions_from_notion() or _load_exceptions_from_processing()
                     note_exc = [e for e in exceptions if e["note_id"] == note_id]
                     note_title = note_exc[0]["title"] if note_exc else ""
                     if note_title:
@@ -1166,7 +1166,7 @@ def create_app() -> FastAPI:
             )
 
         client = NotionClient(notion_key)
-        exceptions = _load_exceptions_from_processing()
+        exceptions = _load_exceptions_from_notion() or _load_exceptions_from_processing()
         link_exceptions = [e for e in exceptions if "Evernote Link" in e["reasons"]]
 
         # Group by target and sort by count desc
@@ -1249,7 +1249,7 @@ def create_app() -> FastAPI:
         link_log.info("Target page found: %s (%s)", page_name, target_page.page_id)
 
         # Step 2: Find all exception records referencing this page name
-        exceptions = _load_exceptions_from_processing()
+        exceptions = _load_exceptions_from_notion() or _load_exceptions_from_processing()
         referencing = [e for e in exceptions if "Evernote Link" in e["reasons"] and e.get("link_text", "").strip() == page_name]
         link_log.info("Found %d exceptions referencing '%s'", len(referencing), page_name)
 
@@ -1323,7 +1323,7 @@ def create_app() -> FastAPI:
     @app.get("/resolve/passwords", response_class=HTMLResponse)
     def resolve_passwords(request: Request):
         """List all encrypted exceptions for batch password management."""
-        exceptions = _load_exceptions_from_processing()
+        exceptions = _load_exceptions_from_notion() or _load_exceptions_from_processing()
         encrypted = [e for e in exceptions if "Encrypted" in e["reasons"] or "Encrypted" in e.get("error_message", "")]
         return templates.TemplateResponse(
             request=request,
@@ -1346,7 +1346,7 @@ def create_app() -> FastAPI:
     def passwords_decrypt(request: Request, note_id: str):
         """Decrypt a single password — opens in new tab for easy copy."""
         # Reuse the existing decrypt view logic
-        exceptions = _load_exceptions_from_processing()
+        exceptions = _load_exceptions_from_notion() or _load_exceptions_from_processing()
         note_exceptions = [e for e in exceptions if e["note_id"] == note_id]
         hint = ""
         proc_dir = Path(_wizard_state.get("processing_directory", "")).expanduser().resolve()
@@ -1445,7 +1445,7 @@ def create_app() -> FastAPI:
             import re as _strip_re3
             decrypted_text = _strip_re3.sub(r'<[^>]+>', '', decrypted_text).strip()
 
-            exceptions = _load_exceptions_from_processing()
+            exceptions = _load_exceptions_from_notion() or _load_exceptions_from_processing()
             note_exc = [e for e in exceptions if e["note_id"] == note_id]
             title = note_exc[0]["title"] if note_exc else note_id
             return templates.TemplateResponse(request=request, name="passwords_result.html", context={"error": "", "decrypted": decrypted_text, "title": title})
@@ -1459,7 +1459,7 @@ def create_app() -> FastAPI:
         if not notion_key:
             return RedirectResponse(url="/resolve/", status_code=303)
         client = NotionClient(notion_key)
-        exceptions = _load_exceptions_from_processing()
+        exceptions = _load_exceptions_from_notion() or _load_exceptions_from_processing()
         empty = [e for e in exceptions if "No Content" in e["reasons"]]
         deleted = 0
         for exc in empty:
@@ -1522,7 +1522,7 @@ def create_app() -> FastAPI:
             step = "Connected to Notion — ready to extract"
         elif _wizard_state.get("step1_complete") == "true":
             step = "Source configured — connecting to Notion"
-        exceptions = _load_exceptions_from_processing()
+        exceptions = _load_exceptions_from_notion() or _load_exceptions_from_processing()
         return templates.TemplateResponse(
             request=request,
             name="wizard_status.html",
