@@ -87,6 +87,9 @@ def create_app() -> FastAPI:
         notion_root: str = Form(""),
         resume: str | None = Form(None),
     ) -> RedirectResponse:
+        _wizard_state.setdefault("notion_key", notion_key.strip())
+        if notion_root.strip():
+            _wizard_state.setdefault("notion_root", notion_root.strip())
         try:
             args = _build_notion_import_args(
                 enex_source=enex_source,
@@ -132,6 +135,34 @@ def create_app() -> FastAPI:
     # In-memory wizard state (per-process; sufficient for single-user local tool)
     _wizard_state: dict[str, str] = {}
 
+    # Persist/load wizard config so pages work across restarts without re-running wizard
+    _CONFIG_PATH = Path("~/.e2n/config.json").expanduser()
+
+    def _save_wizard_config():
+        """Save notion credentials to disk for persistence across restarts."""
+        _CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        import json as _j
+        data = {k: v for k, v in _wizard_state.items() if k in ("notion_key", "notion_root", "enex_source", "processing_directory")}
+        _CONFIG_PATH.write_text(_j.dumps(data), encoding="utf-8")
+
+    def _load_wizard_config():
+        """Load saved config into wizard state."""
+        if _CONFIG_PATH.exists():
+            import json as _j
+            try:
+                data = _j.loads(_CONFIG_PATH.read_text(encoding="utf-8"))
+                for k, v in data.items():
+                    _wizard_state.setdefault(k, v)
+            except Exception:
+                pass
+
+    # Seed from persisted config, then override with env vars
+    _load_wizard_config()
+    if os.environ.get("NOTION_KEY") or os.environ.get("NOTION_TOKEN"):
+        _wizard_state["notion_key"] = os.environ.get("NOTION_KEY", "") or os.environ.get("NOTION_TOKEN", "")
+    if os.environ.get("NOTION_ROOT"):
+        _wizard_state["notion_root"] = os.environ.get("NOTION_ROOT", "")
+
     @app.get("/wizard/", response_class=HTMLResponse)
     def wizard_root(request: Request) -> HTMLResponse:
         return templates.TemplateResponse(
@@ -159,6 +190,7 @@ def create_app() -> FastAPI:
         _wizard_state["enex_source"] = str(source_path)
         _wizard_state["processing_directory"] = str(proc_path)
         _wizard_state["step1_complete"] = "true"
+        _save_wizard_config()
         return RedirectResponse(url="/wizard/step/2", status_code=303)
 
     @app.get("/wizard/step/2", response_class=HTMLResponse)
@@ -196,6 +228,7 @@ def create_app() -> FastAPI:
             _wizard_state["notion_key"] = notion_key.strip()
             _wizard_state["notion_root"] = notion_root.strip()
             _wizard_state["step2_complete"] = "true"
+            _save_wizard_config()
             return RedirectResponse(url="/wizard/step/3", status_code=303)
         except Exception as exc:
             error_msg = str(exc)
