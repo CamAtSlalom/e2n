@@ -863,6 +863,10 @@ def create_app() -> FastAPI:
             decrypted_bytes = unpadder.update(padded) + unpadder.finalize()
             decrypted_text = decrypted_bytes.decode("utf-8")
 
+            # Strip HTML tags — decrypted Evernote content is ENML/HTML
+            import re as _strip_re
+            decrypted_text = _strip_re.sub(r'<[^>]+>', '', decrypted_text).strip()
+
             # Look up the page and block_id for resolution actions
             page_id = ""
             block_id = ""
@@ -964,6 +968,9 @@ def create_app() -> FastAPI:
             padded = decryptor.update(ciphertext) + decryptor.finalize()
             unpadder = padding.PKCS7(128).unpadder()
             decrypted_text = (unpadder.update(padded) + unpadder.finalize()).decode("utf-8")
+            # Strip HTML tags — decrypted Evernote content is ENML/HTML
+            import re as _strip_re2
+            decrypted_text = _strip_re2.sub(r'<[^>]+>', '', decrypted_text).strip()
         except Exception:
             return RedirectResponse(url=f"/resolve/decrypt/{note_id}", status_code=303)
 
