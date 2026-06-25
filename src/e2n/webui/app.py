@@ -457,26 +457,59 @@ def create_app() -> FastAPI:
     def wizard_step_5(request: Request):
         if _wizard_state.get("step4_complete") != "true" and _wizard_state.get("step3_complete") != "true":
             return RedirectResponse(url="/wizard/step/4", status_code=303)
-        # Collect exception summary from processing directories
+        # Collect per-source summary from processing directories
         proc_dir = Path(_wizard_state.get("processing_directory", "")).expanduser().resolve()
-        exceptions_summary: list[dict] = []
+        sources_summary: list[dict] = []
+        total_imported = 0
+        total_exceptions = 0
+        total_link_exceptions = 0
+        total_encrypted = 0
+
         if proc_dir.exists():
-            for child in proc_dir.iterdir():
-                exc_file = child / "exceptions.txt" if child.is_dir() else None
-                if exc_file and exc_file.exists():
+            for child in sorted(proc_dir.iterdir()):
+                if not child.is_dir():
+                    continue
+                # Count imported notes
+                state_path = child / "state.db"
+                imported = 0
+                if state_path.exists():
+                    store = ProcessingStateStore(state_path)
+                    try:
+                        run_id = store.latest_run_id()
+                        if run_id:
+                            notes = store.list_notes(run_id, status="extracted")
+                            imported = len(notes)
+                    finally:
+                        store.close()
+
+                # Count exceptions
+                exc_count = 0
+                exc_file = child / "exceptions.txt"
+                if exc_file.exists():
                     lines = exc_file.read_text(encoding="utf-8").strip().splitlines()
+                    exc_count = len(lines)
                     for line in lines:
                         parts = line.split("\t")
                         if len(parts) >= 3:
-                            exceptions_summary.append({
-                                "note_id": parts[0],
-                                "title": parts[1],
-                                "reasons": parts[2],
-                            })
+                            if "Evernote Link" in parts[2]:
+                                total_link_exceptions += 1
+                            if "Encrypted" in parts[2]:
+                                total_encrypted += 1
+
+                sources_summary.append({"name": child.name, "imported": imported, "exceptions": exc_count})
+                total_imported += imported
+                total_exceptions += exc_count
+
         return templates.TemplateResponse(
             request=request,
             name="wizard_step5.html",
-            context={"exceptions": exceptions_summary, "total": len(exceptions_summary)},
+            context={
+                "sources": sources_summary,
+                "total_imported": total_imported,
+                "total_exceptions": total_exceptions,
+                "total_link_exceptions": total_link_exceptions,
+                "total_encrypted": total_encrypted,
+            },
         )
 
     # --- Resolution Workbench routes ---
