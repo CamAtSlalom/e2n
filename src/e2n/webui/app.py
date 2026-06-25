@@ -981,6 +981,17 @@ def create_app() -> FastAPI:
 
     # --- Trivial resolution routes ---
 
+    @app.get("/resolve/passwords", response_class=HTMLResponse)
+    def resolve_passwords(request: Request):
+        """List all encrypted exceptions for batch password management."""
+        exceptions = _load_exceptions_from_processing()
+        encrypted = [e for e in exceptions if "Encrypted" in e["reasons"] or "Encrypted" in e.get("error_message", "")]
+        return templates.TemplateResponse(
+            request=request,
+            name="resolve_passwords.html",
+            context={"exceptions": encrypted, "total": len(encrypted)},
+        )
+
     @app.post("/resolve/delete-empty-pages")
     def resolve_delete_empty_pages(request: Request):
         """Batch delete all empty pages (No Content exceptions) from Notion."""
