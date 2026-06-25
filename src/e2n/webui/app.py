@@ -486,7 +486,7 @@ def create_app() -> FastAPI:
         return templates.TemplateResponse(
             request=request,
             name="resolve_dashboard.html",
-            context={"categories": categories, "pages": dict(sorted(pages.items(), key=lambda x: x[1]["count"], reverse=True)), "total": len(exceptions)},
+            context={"categories": categories, "pages": dict(sorted(pages.items(), key=lambda x: (-x[1]["count"], x[1]["title"]))), "total": len(exceptions)},
         )
 
     @app.get("/resolve/type/{reason_slug}", response_class=HTMLResponse)
@@ -824,7 +824,7 @@ def create_app() -> FastAPI:
             return templates.TemplateResponse(
                 request=request,
                 name="resolve_decrypt_result.html",
-                context={"note_id": note_id, "hint": hint, "error": "", "decrypted": decrypted_text},
+                context={"note_id": note_id, "hint": hint, "error": "", "decrypted": decrypted_text, "passphrase": passphrase},
             )
         except Exception as exc:
             error_msg = str(exc)

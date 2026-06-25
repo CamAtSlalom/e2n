@@ -14,7 +14,7 @@
 
 <h3>What would you like to do?</h3>
 <form method="post" action="/resolve/decrypt-import/{{ note_id }}" style="display:inline; margin-right:1em;">
-  <input type="hidden" name="passphrase" value="">
+  <input type="hidden" name="passphrase" value="{{ passphrase }}">
   <input type="hidden" name="block_id" value="">
   <input type="hidden" name="page_id" value="">
   <button type="submit" onclick="return confirm('⚠️ This content will be visible to anyone with workspace access. Notion does not support encryption. Continue?')">
