@@ -1352,7 +1352,7 @@ def create_app() -> FastAPI:
                 pass
         if not all_exceptions:
             all_exceptions = _load_exceptions_from_processing()
-        encrypted = [e for e in all_exceptions if "Encrypted" in e.get("reasons", "") or "Encrypted" in e.get("error_message", "")]
+        encrypted = [e for e in all_exceptions if "Encrypted" in e.get("reasons", "") or "encrypted" in e.get("error_message", "").lower() or "passphrase" in e.get("error_message", "").lower()]
         return templates.TemplateResponse(
             request=request,
             name="passwords.html",
