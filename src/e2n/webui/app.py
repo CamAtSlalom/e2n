@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlencode
@@ -540,6 +541,51 @@ def create_app() -> FastAPI:
                         "error_message": parts[7] if len(parts) > 7 else "",
                     })
         return exceptions
+
+    def _load_exceptions_from_notion() -> list[dict]:
+        """Load open exceptions from the Notion Import-Exceptions database."""
+        notion_key = _wizard_state.get("notion_key", "") or os.environ.get("NOTION_KEY", "") or os.environ.get("NOTION_TOKEN", "")
+        notion_root = _wizard_state.get("notion_root", "") or os.environ.get("NOTION_ROOT", "")
+        if not notion_key or not notion_root:
+            return []
+        try:
+            client = NotionClient(notion_key)
+            bootstrap_result = bootstrap_notion_pages(notion_key, root_title=notion_root)
+            exc_db = ensure_exception_database(client, bootstrap_result.exceptions.page_id)
+            # Query all rows from the exception database
+            results = client._api(f"databases/{exc_db.database_id}/query", "POST", {})
+            exceptions: list[dict] = []
+            for page in results.get("results", []):
+                props = page.get("properties", {})
+                title_items = props.get("Note Name", {}).get("title", [])
+                title = "".join(t.get("text", {}).get("content", "") for t in title_items)
+                reason_items = props.get("Reason", {}).get("multi_select", [])
+                reasons = ",".join(r.get("name", "") for r in reason_items)
+                status_obj = props.get("Status", {}).get("select")
+                status = status_obj.get("name", "") if status_obj else ""
+                error_items = props.get("Error Message", {}).get("rich_text", [])
+                error_msg = "".join(t.get("text", {}).get("content", "") for t in error_items)
+                link_items = props.get("Linkable Text", {}).get("rich_text", [])
+                link_text = "".join(t.get("text", {}).get("content", "") for t in link_items)
+                link_url = props.get("Link", {}).get("url", "")
+
+                # Only include Open exceptions
+                if status == "Resolved":
+                    continue
+
+                exceptions.append({
+                    "note_id": page["id"],
+                    "title": title,
+                    "reasons": reasons,
+                    "error_message": error_msg,
+                    "link_text": link_text,
+                    "link_value": "",
+                    "block_url": link_url,
+                    "status": status,
+                })
+            return exceptions
+        except Exception:
+            return []
 
     @app.get("/resolve/", response_class=HTMLResponse)
     def resolve_dashboard(request: Request):
@@ -1090,7 +1136,7 @@ def create_app() -> FastAPI:
     @app.get("/links/", response_class=HTMLResponse)
     def links_home(request: Request):
         """Show unique link targets and how many exceptions reference each."""
-        exceptions = _load_exceptions_from_processing()
+        exceptions = _load_exceptions_from_notion() or _load_exceptions_from_processing()
         link_exceptions = [e for e in exceptions if "Evernote Link" in e["reasons"]]
         # Group by link_text (the target page name)
         targets: dict[str, int] = {}
@@ -1288,7 +1334,7 @@ def create_app() -> FastAPI:
     @app.get("/passwords/", response_class=HTMLResponse)
     def passwords_home(request: Request):
         """First-class password management — lists all encrypted items from Import-Exceptions."""
-        exceptions = _load_exceptions_from_processing()
+        exceptions = _load_exceptions_from_notion() or _load_exceptions_from_processing()
         encrypted = [e for e in exceptions if "Encrypted" in e["reasons"] or "Encrypted" in e.get("error_message", "")]
         return templates.TemplateResponse(
             request=request,
