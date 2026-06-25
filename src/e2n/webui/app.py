@@ -692,7 +692,7 @@ def create_app() -> FastAPI:
                         # Find the callout block with this link text
                         children = client.list_block_children(note_page.page_id)
                         for block in children:
-                            if block.get("type") == "callout":
+                            if block.get("type") in ("callout", "paragraph", "quote", "heading_1", "heading_2", "heading_3"):
                                 block_text = "".join(
                                     rt.get("text", {}).get("content", "")
                                     for rt in block.get("callout", {}).get("rich_text", [])
@@ -774,7 +774,7 @@ def create_app() -> FastAPI:
                 try:
                     children = client.list_block_children(pages[0].page_id)
                     for block in children:
-                        if block.get("type") == "callout":
+                        if block.get("type") in ("callout", "paragraph", "quote", "heading_1", "heading_2", "heading_3"):
                             client.delete_block(block["id"])
                 except Exception:
                     pass
@@ -1202,8 +1202,8 @@ def create_app() -> FastAPI:
                         continue
                     children = client.list_block_children(note_pages[0].page_id)
                     for block in children:
-                        if block.get("type") == "callout":
-                            block_text = "".join(rt.get("text", {}).get("content", "") for rt in block.get("callout", {}).get("rich_text", []))
+                        if block.get("type") in ("callout", "paragraph", "quote", "heading_1", "heading_2", "heading_3"):
+                            block_text = "".join(rt.get("text", {}).get("content", "") for rt in block.get(block.get("type", ""), {}).get("rich_text", []))
                             if page_name in block_text:
                                 client.update_block_with_page_link(block["id"], page_name, target_url)
                                 resolved_this += 1
@@ -1273,7 +1273,7 @@ def create_app() -> FastAPI:
                 children = client.list_block_children(note_page.page_id)
                 replaced = False
                 for block in children:
-                    if block.get("type") == "callout":
+                    if block.get("type") in ("callout", "paragraph", "quote", "heading_1", "heading_2", "heading_3"):
                         block_text = "".join(
                             rt.get("text", {}).get("content", "") for rt in block.get("callout", {}).get("rich_text", [])
                         )
