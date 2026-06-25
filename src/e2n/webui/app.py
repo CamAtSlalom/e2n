@@ -762,11 +762,27 @@ def create_app() -> FastAPI:
         return RedirectResponse(url="/resolve/", status_code=303)
 
     @app.post("/resolve/delete-block")
-    def resolve_delete_block(request: Request, block_id: str = Form(...), note_id: str = Form("")):
+    def resolve_delete_block(request: Request, block_id: str = Form(default=""), note_id: str = Form(default="")):
         notion_key = _wizard_state.get("notion_key", "")
         if notion_key:
             client = NotionClient(notion_key)
-            client.delete_block(block_id)
+            if block_id:
+                client.delete_block(block_id)
+            elif note_id:
+                # Look up by note_id — find the page and delete callout blocks
+                exceptions = _load_exceptions_from_processing()
+                note_exc = [e for e in exceptions if e["note_id"] == note_id]
+                note_title = note_exc[0]["title"] if note_exc else ""
+                if note_title:
+                    pages = [p for p in client.search_pages(note_title) if p.title == note_title]
+                    if pages:
+                        try:
+                            children = client.list_block_children(pages[0].page_id)
+                            for blk in children:
+                                if blk.get("type") == "callout":
+                                    client.delete_block(blk["id"])
+                        except Exception:
+                            pass
         return RedirectResponse(url="/resolve/", status_code=303)
 
     @app.get("/resolve/decrypt/{note_id}", response_class=HTMLResponse)
