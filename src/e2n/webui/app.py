@@ -1049,6 +1049,127 @@ def create_app() -> FastAPI:
             context={"exceptions": encrypted, "total": len(encrypted)},
         )
 
+    @app.get("/passwords/", response_class=HTMLResponse)
+    def passwords_home(request: Request):
+        """First-class password management — lists all encrypted items from Import-Exceptions."""
+        exceptions = _load_exceptions_from_processing()
+        encrypted = [e for e in exceptions if "Encrypted" in e["reasons"] or "Encrypted" in e.get("error_message", "")]
+        return templates.TemplateResponse(
+            request=request,
+            name="passwords.html",
+            context={"exceptions": encrypted, "total": len(encrypted)},
+        )
+
+    @app.get("/passwords/decrypt/{note_id}", response_class=HTMLResponse)
+    def passwords_decrypt(request: Request, note_id: str):
+        """Decrypt a single password — opens in new tab for easy copy."""
+        # Reuse the existing decrypt view logic
+        exceptions = _load_exceptions_from_processing()
+        note_exceptions = [e for e in exceptions if e["note_id"] == note_id]
+        hint = ""
+        proc_dir = Path(_wizard_state.get("processing_directory", "")).expanduser().resolve()
+        if proc_dir.exists():
+            for child in proc_dir.iterdir():
+                if not child.is_dir():
+                    continue
+                note_file = child / "notes" / f"{note_id}.enex"
+                if note_file.exists():
+                    from lxml import etree as _etree
+                    tree = _etree.parse(str(note_file), parser=_etree.XMLParser(recover=True))
+                    root = tree.getroot()
+                    note_el = root.find("note") if root.tag != "note" else root
+                    content_el = note_el.find("content") if note_el is not None else None
+                    content_text = content_el.text or "" if content_el is not None else ""
+                    if content_text:
+                        try:
+                            enml_root = _etree.fromstring(content_text.encode("utf-8"), parser=_etree.XMLParser(recover=True))
+                            for crypt_el in enml_root.iter():
+                                if crypt_el.tag == "en-crypt" or (crypt_el.tag and crypt_el.tag.endswith("en-crypt")):
+                                    hint = crypt_el.attrib.get("hint", "")
+                                    break
+                        except Exception:
+                            pass
+                    break
+        title = note_exceptions[0]["title"] if note_exceptions else note_id
+        return templates.TemplateResponse(
+            request=request,
+            name="passwords_decrypt.html",
+            context={"note_id": note_id, "hint": hint, "title": title},
+        )
+
+    @app.post("/passwords/decrypt/{note_id}", response_class=HTMLResponse)
+    def passwords_decrypt_post(request: Request, note_id: str, passphrase: str = Form(...)):
+        """Decrypt and show password content in a minimal view for copying."""
+        import base64 as _b64
+        proc_dir = Path(_wizard_state.get("processing_directory", "")).expanduser().resolve()
+        encrypted_b64 = ""
+        key_length = 128
+
+        if proc_dir.exists():
+            for child in proc_dir.iterdir():
+                if not child.is_dir():
+                    continue
+                note_file = child / "notes" / f"{note_id}.enex"
+                if note_file.exists():
+                    from lxml import etree as _etree
+                    tree = _etree.parse(str(note_file), parser=_etree.XMLParser(recover=True))
+                    root = tree.getroot()
+                    note_el = root.find("note") if root.tag != "note" else root
+                    content_el = note_el.find("content") if note_el is not None else None
+                    content_text = content_el.text or "" if content_el is not None else ""
+                    if content_text:
+                        try:
+                            enml_root = _etree.fromstring(content_text.encode("utf-8"), parser=_etree.XMLParser(recover=True))
+                            for crypt_el in enml_root.iter():
+                                if crypt_el.tag == "en-crypt" or (crypt_el.tag and crypt_el.tag.endswith("en-crypt")):
+                                    length_str = crypt_el.attrib.get("length", "128")
+                                    key_length = int(length_str) if length_str.isdigit() else 128
+                                    encrypted_b64 = (crypt_el.text or "").strip()
+                                    break
+                        except Exception:
+                            pass
+                    break
+
+        if not encrypted_b64:
+            return templates.TemplateResponse(request=request, name="passwords_result.html", context={"error": "No encrypted content found.", "decrypted": "", "title": note_id})
+
+        try:
+            from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+            from cryptography.hazmat.primitives import padding, hashes
+            from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+            import hmac as _hmac
+
+            raw = _b64.b64decode(encrypted_b64)
+            salt = raw[4:20]
+            salthmac = raw[20:36]
+            iv = raw[36:52]
+            ciphertext = raw[52:-32]
+            stored_hmac = raw[-32:]
+            body = raw[0:-32]
+
+            kdf_hmac = PBKDF2HMAC(algorithm=hashes.SHA256(), length=key_length // 8, salt=salthmac, iterations=50000)
+            key_hmac = kdf_hmac.derive(passphrase.encode("utf-8"))
+            computed_hmac = _hmac.new(key_hmac, body, "sha256").digest()
+            if not _hmac.compare_digest(computed_hmac, stored_hmac):
+                return templates.TemplateResponse(request=request, name="passwords_result.html", context={"error": "Wrong passphrase.", "decrypted": "", "title": note_id})
+
+            kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=key_length // 8, salt=salt, iterations=50000)
+            key = kdf.derive(passphrase.encode("utf-8"))
+            cipher = Cipher(algorithms.AES(key), modes.CBC(iv))
+            decryptor = cipher.decryptor()
+            padded = decryptor.update(ciphertext) + decryptor.finalize()
+            unpadder = padding.PKCS7(128).unpadder()
+            decrypted_text = (unpadder.update(padded) + unpadder.finalize()).decode("utf-8")
+            import re as _strip_re3
+            decrypted_text = _strip_re3.sub(r'<[^>]+>', '', decrypted_text).strip()
+
+            exceptions = _load_exceptions_from_processing()
+            note_exc = [e for e in exceptions if e["note_id"] == note_id]
+            title = note_exc[0]["title"] if note_exc else note_id
+            return templates.TemplateResponse(request=request, name="passwords_result.html", context={"error": "", "decrypted": decrypted_text, "title": title})
+        except Exception as exc:
+            return templates.TemplateResponse(request=request, name="passwords_result.html", context={"error": f"Decryption failed: {exc}", "decrypted": "", "title": note_id})
+
     @app.post("/resolve/delete-empty-pages")
     def resolve_delete_empty_pages(request: Request):
         """Batch delete all empty pages (No Content exceptions) from Notion."""
