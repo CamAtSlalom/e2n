@@ -400,6 +400,48 @@ def create_app() -> FastAPI:
                 finally:
                     store.close()
 
+                # Create Notion rows for extraction-time exceptions (Empty Title, No Content)
+                # These are in exceptions.txt from extraction but don't get import-time rows
+                exc_file = output_dir / "exceptions.txt"
+                if exc_file.exists():
+                    from e2n.notion import create_exception_row as _create_ext_exc
+                    import_time_notes: set[str] = set()  # notes that already got exception rows during import
+                    for line in exc_file.read_text(encoding="utf-8").strip().splitlines():
+                        parts = line.split("\t")
+                        if len(parts) < 3:
+                            continue
+                        exc_note_id = parts[0]
+                        exc_title = parts[1]
+                        exc_reasons = parts[2]
+                        # Skip if this is an import-time exception (Evernote Link, Unsupported, Encrypted)
+                        # — those already have Notion rows from the import loop above
+                        if "Evernote Link" in exc_reasons or "Unsupported Content" in exc_reasons or "Encrypted" in exc_reasons:
+                            continue
+                        # This is an extraction-time-only exception (Empty Title, No Content)
+                        dedup_key = f"{exc_note_id}:{exc_reasons}"
+                        if dedup_key in import_time_notes:
+                            continue
+                        import_time_notes.add(dedup_key)
+                        # Find the page URL for this note
+                        page_url = ""
+                        try:
+                            found = [p for p in client.search_pages(exc_title) if p.title == exc_title]
+                            if found:
+                                page_url = found[0].url or f"https://www.notion.so/{found[0].page_id.replace('-', '')}"
+                        except Exception:
+                            pass
+                        try:
+                            _create_ext_exc(
+                                client,
+                                exception_database_id=exc_db.database_id,
+                                note_name=exc_title,
+                                reasons=tuple(r.strip() for r in exc_reasons.split(",")),
+                                source_file=src.name,
+                                page_url=page_url,
+                            )
+                        except Exception as ext_err:
+                            log.warning("Could not create extraction exception row for %s: %s", exc_title, ext_err)
+
             log.info("Import complete: %d notes imported", imported_count)
             _wizard_state["step4_complete"] = "true"
             return RedirectResponse(url="/wizard/step/5", status_code=303)
