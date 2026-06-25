@@ -506,33 +506,53 @@ class NotionClient:
         return _page_ref(self._sdk_call(self._sdk_client.pages.update, page_id=page_id, archived=True))
 
     def update_block_with_page_link(self, block_id: str, link_text: str, page_url: str) -> JsonObject:
-        """Replace a block with a simple inline page link (paragraph with underlined link text)."""
-        # Try updating as paragraph (type change — works if block type is already paragraph)
+        """Replace a block with a plain paragraph containing an inline page mention."""
+        # Get the block's parent page_id first
         try:
-            body = {
+            block_info = self._sdk_call(self._sdk_client.blocks.retrieve, block_id=block_id)
+            parent = block_info.get("parent", {})
+            parent_id = parent.get("page_id") or parent.get("block_id", "")
+        except Exception:
+            parent_id = ""
+
+        # Delete the old block (callout/placeholder)
+        self.delete_block(block_id)
+
+        # Extract page_id from URL for a mention (avoids Notion's link preview box)
+        # URL format: https://www.notion.so/{page_id_no_dashes} or with title slug
+        page_id = ""
+        if page_url:
+            # Last path segment (strip query), take last 32 hex chars
+            segment = page_url.rstrip("/").split("/")[-1].split("?")[0].split("#")[0]
+            # May have title-slug-pageid format (last 32 chars are the ID)
+            candidate = segment[-32:] if len(segment) >= 32 else segment
+            if all(c in "0123456789abcdef" for c in candidate) and len(candidate) == 32:
+                page_id = f"{candidate[:8]}-{candidate[8:12]}-{candidate[12:16]}-{candidate[16:20]}-{candidate[20:]}"
+
+        # Append a new paragraph with page mention (renders as inline link, no box)
+        if parent_id and page_id:
+            new_block = {
+                "paragraph": {
+                    "rich_text": [{"type": "mention", "mention": {"type": "page", "page": {"id": page_id}}}]
+                }
+            }
+            try:
+                result = self._sdk_call(self._sdk_client.blocks.children.append, block_id=parent_id, children=[new_block])
+                return result
+            except Exception:
+                pass
+        elif parent_id:
+            # Fallback: plain text link if we can't extract page_id
+            new_block = {
                 "paragraph": {
                     "rich_text": [{"type": "text", "text": {"content": link_text, "link": {"url": page_url}}}]
                 }
             }
-            return self._sdk_call(self._sdk_client.blocks.update, block_id=block_id, **body)
-        except NotionAPIError:
-            pass
-
-        # Fallback: update as callout but with simple link text (no emoji, no color)
-        try:
-            body = {
-                "callout": {
-                    "rich_text": [{"type": "text", "text": {"content": link_text, "link": {"url": page_url}}}],
-                    "icon": {"type": "emoji", "emoji": "🔗"},
-                    "color": "default",
-                }
-            }
-            return self._sdk_call(self._sdk_client.blocks.update, block_id=block_id, **body)
-        except NotionAPIError:
-            pass
-
-        # Last resort: delete and append new paragraph
-        self.delete_block(block_id)
+            try:
+                result = self._sdk_call(self._sdk_client.blocks.children.append, block_id=parent_id, children=[new_block])
+                return result
+            except Exception:
+                pass
         return {}
 
     def upload_file(self, file_path: "Path", mime_type: str = "") -> str:

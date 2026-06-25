@@ -1165,7 +1165,7 @@ def create_app() -> FastAPI:
 
     @app.get("/links/", response_class=HTMLResponse)
     def links_home(request: Request):
-        """Show unique link targets and how many exceptions reference each."""
+        """Show unique link targets split by whether the target page exists in imports."""
         exceptions = _load_exceptions_from_notion() or _load_exceptions_from_processing()
         link_exceptions = [e for e in exceptions if "Evernote Link" in e["reasons"]]
         # Group by link_text (the target page name), track source pages
@@ -1179,12 +1179,39 @@ def create_app() -> FastAPI:
                 src_title = exc.get("title", "")
                 if src_title and src_title not in targets[lt]["sources"]:
                     targets[lt]["sources"].append(src_title)
-        # Sort by count desc, then alpha
-        sorted_targets = sorted(targets.items(), key=lambda x: (-x[1]["count"], x[0]))
+
+        # Check which targets exist in import databases
+        notion_key = _wizard_state.get("notion_key", "") or os.environ.get("NOTION_KEY", "") or os.environ.get("NOTION_TOKEN", "")
+        exists_set: set[str] = set()
+        if notion_key and targets:
+            try:
+                client = NotionClient(notion_key)
+                import_dbs = _get_import_db_ids(client, notion_key)
+                for name in targets:
+                    found = client.search_pages(name)
+                    if any(getattr(p, "parent_database_id", "") in import_dbs for p in found):
+                        exists_set.add(name)
+            except Exception:
+                pass
+
+        # Split into exists / not-exists, each sorted by count desc then alpha
+        exists_targets = sorted(
+            [(n, info) for n, info in targets.items() if n in exists_set],
+            key=lambda x: (-x[1]["count"], x[0]),
+        )
+        missing_targets = sorted(
+            [(n, info) for n, info in targets.items() if n not in exists_set],
+            key=lambda x: (-x[1]["count"], x[0]),
+        )
         return templates.TemplateResponse(
             request=request,
             name="links.html",
-            context={"targets": sorted_targets, "total_links": len(link_exceptions), "total_targets": len(targets)},
+            context={
+                "exists_targets": exists_targets,
+                "missing_targets": missing_targets,
+                "total_links": len(link_exceptions),
+                "total_targets": len(targets),
+            },
         )
 
     @app.post("/links/resolve-all", response_class=HTMLResponse)
@@ -1356,10 +1383,14 @@ def create_app() -> FastAPI:
                 continue
 
             try:
-                client.update_block_with_page_link(block_id, page_name, target_url)
+                client.update_block_with_page_link(block_id, search_name, target_url)
                 if exc_row_id:
                     try:
-                        client._sdk_call(client._sdk_client.pages.update, page_id=exc_row_id, properties={"Status": {"select": {"name": "Resolved"}}, "Link": {"url": block_url or target_url}})
+                        client._sdk_call(client._sdk_client.pages.update, page_id=exc_row_id, properties={
+                            "Status": {"select": {"name": "Resolved"}},
+                            "Link": {"url": block_url or target_url},
+                            "Linkable Text": {"rich_text": [{"text": {"content": search_name}}]},
+                        })
                     except Exception:
                         pass
                 resolved += 1
