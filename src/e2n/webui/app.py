@@ -435,6 +435,7 @@ def create_app() -> FastAPI:
                                         link_text=getattr(exc, "link_text", ""),
                                         link_value=getattr(exc, "link_value", ""),
                                         page_url=exc_url,
+                                        encrypted_content=getattr(exc, "encrypted_content", ""),
                                     )
                                 except Exception as exc_err:
                                     log.warning("Could not create exception row: %s", exc_err)
@@ -1043,36 +1044,31 @@ def create_app() -> FastAPI:
     ):
         """Decrypt content, insert as paragraph block at marker position, delete marker."""
         import base64 as _b64
-        import hashlib as _hashlib
 
-        proc_dir = Path(_wizard_state.get("processing_directory", "")).expanduser().resolve()
         encrypted_b64 = ""
         key_length = 128
 
-        if proc_dir.exists():
-            for child in proc_dir.iterdir():
-                if not child.is_dir():
-                    continue
-                note_file = child / "notes" / f"{note_id}.enex"
-                if note_file.exists():
-                    from lxml import etree as _etree
-                    tree = _etree.parse(str(note_file), parser=_etree.XMLParser(recover=True))
-                    root = tree.getroot()
-                    note_el = root.find("note") if root.tag != "note" else root
-                    content_el = note_el.find("content") if note_el is not None else None
-                    content_text = content_el.text or "" if content_el is not None else ""
-                    if content_text:
-                        try:
-                            enml_root = _etree.fromstring(content_text.encode("utf-8"), parser=_etree.XMLParser(recover=True))
-                            for crypt_el in enml_root.iter():
-                                if crypt_el.tag == "en-crypt" or (crypt_el.tag and crypt_el.tag.endswith("en-crypt")):
-                                    length_str = crypt_el.attrib.get("length", "128")
-                                    key_length = int(length_str) if length_str.isdigit() else 128
-                                    encrypted_b64 = (crypt_el.text or "").strip()
-                                    break
-                        except Exception:
-                            pass
-                    break
+        # Read encrypted content from the exception row
+        notion_key = _wizard_state.get("notion_key", "") or os.environ.get("NOTION_KEY", "") or os.environ.get("NOTION_TOKEN", "")
+        if notion_key:
+            try:
+                client = NotionClient(notion_key)
+                row = client._api(f"pages/{note_id}", "GET")
+                props = row.get("properties", {})
+                enc_items = props.get("Encrypted Content", {}).get("rich_text", [])
+                encrypted_b64 = "".join(t.get("text", {}).get("content", "") for t in enc_items).strip()
+                # Also extract block_id/page_id from Link field if not provided
+                if not page_id or not block_id:
+                    link_url = props.get("Link", {}).get("url", "")
+                    if "#" in link_url:
+                        page_id_raw = link_url.split("/")[-1].split("#")[0]
+                        block_id_raw = link_url.split("#")[-1]
+                        if len(page_id_raw) == 32:
+                            page_id = f"{page_id_raw[:8]}-{page_id_raw[8:12]}-{page_id_raw[12:16]}-{page_id_raw[16:20]}-{page_id_raw[20:]}"
+                        if len(block_id_raw) == 32:
+                            block_id = f"{block_id_raw[:8]}-{block_id_raw[8:12]}-{block_id_raw[12:16]}-{block_id_raw[16:20]}-{block_id_raw[20:]}"
+            except Exception:
+                pass
 
         if not encrypted_b64:
             return RedirectResponse(url=f"/resolve/decrypt/{note_id}", status_code=303)
@@ -1102,61 +1098,33 @@ def create_app() -> FastAPI:
             return RedirectResponse(url=f"/resolve/decrypt/{note_id}", status_code=303)
 
         # Insert decrypted content as paragraph block, delete marker, mark resolved
-        notion_key = _wizard_state.get("notion_key", "")
-        if notion_key:
+        if notion_key and page_id and block_id:
             from e2n.notion import paragraph_block, plain_text_span
-            client = NotionClient(notion_key)
 
-            # If we don't have page_id/block_id from form, get from exception Link field
-            if not page_id or not block_id:
-                exceptions = _load_exceptions_from_notion() or _load_exceptions_from_processing()
-                note_exc = [e for e in exceptions if e["note_id"] == note_id]
-                if note_exc:
-                    block_url = note_exc[0].get("block_url", "")
-                    if "#" in block_url:
-                        page_id_raw = block_url.split("/")[-1].split("#")[0]
-                        block_id_raw = block_url.split("#")[-1]
-                        if len(page_id_raw) == 32:
-                            page_id = f"{page_id_raw[:8]}-{page_id_raw[8:12]}-{page_id_raw[12:16]}-{page_id_raw[16:20]}-{page_id_raw[20:]}"
-                        if len(block_id_raw) == 32:
-                            block_id = f"{block_id_raw[:8]}-{block_id_raw[8:12]}-{block_id_raw[12:16]}-{block_id_raw[16:20]}-{block_id_raw[20:]}"
-
-            if page_id and block_id:
-                # Replace the callout with decrypted content (update block to paragraph)
-                try:
-                    client._sdk_call(
-                        client._sdk_client.blocks.update,
-                        block_id=block_id,
-                        paragraph={"rich_text": [{"type": "text", "text": {"content": decrypted_text[:2000]}}]},
-                    )
-                except Exception:
-                    # Fallback: append new block and delete old
-                    block = paragraph_block([plain_text_span(decrypted_text[:2000])])
-                    client._sdk_call(client._sdk_client.blocks.children.append, block_id=page_id, children=[block])
-                    client.delete_block(block_id)
-
-                # Mark exception row as Resolved
+            # Delete the marker block and append decrypted content
+            try:
+                client.delete_block(block_id)
+                block = paragraph_block([plain_text_span(decrypted_text[:2000])])
+                result = client._sdk_call(client._sdk_client.blocks.children.append, block_id=page_id, children=[block])
+                # Get the new block's URL
+                new_blocks = result.get("results", [])
+                new_block_id = new_blocks[0]["id"].replace("-", "") if new_blocks else ""
                 page_id_clean = page_id.replace("-", "")
-                block_id_clean = block_id.replace("-", "")
-                resolved_url = f"https://www.notion.so/{page_id_clean}#{block_id_clean}"
-                try:
-                    exceptions = _load_exceptions_from_notion() or _load_exceptions_from_processing()
-                    note_exc = [e for e in exceptions if e["note_id"] == note_id]
-                    note_title = note_exc[0]["title"] if note_exc else ""
-                    if note_title:
-                        all_matches = client.search_pages(note_title)
-                        for p in all_matches:
-                            if p.title == note_title:
-                                try:
-                                    client._sdk_call(
-                                        client._sdk_client.pages.update,
-                                        page_id=p.page_id,
-                                        properties={"Status": {"select": {"name": "Resolved"}}, "Link": {"url": resolved_url}},
-                                    )
-                                except Exception:
-                                    pass
-                except Exception:
-                    pass
+                resolved_url = f"https://www.notion.so/{page_id_clean}#{new_block_id}" if new_block_id else f"https://www.notion.so/{page_id_clean}"
+            except Exception:
+                resolved_url = ""
+
+            # Update exception row: Status=Resolved, Link=new block URL, clear Encrypted Content
+            try:
+                update_props: dict = {
+                    "Status": {"select": {"name": "Resolved"}},
+                    "Encrypted Content": {"rich_text": []},
+                }
+                if resolved_url:
+                    update_props["Link"] = {"url": resolved_url}
+                client._sdk_call(client._sdk_client.pages.update, page_id=note_id, properties=update_props)
+            except Exception:
+                pass
 
         _invalidate_exceptions_cache()
         return RedirectResponse(url="/resolve/", status_code=303)
@@ -1497,75 +1465,29 @@ def create_app() -> FastAPI:
     def passwords_decrypt_post(request: Request, note_id: str, passphrase: str = Form(...)):
         """Decrypt and show password content in a minimal view for copying."""
         import base64 as _b64
-        proc_dir = Path(_wizard_state.get("processing_directory", "")).expanduser().resolve()
         encrypted_b64 = ""
         key_length = 128
+        title = note_id
 
-        # Get the note title from the exception row to find the correct ENEX file
+        # Read encrypted content directly from the exception row
         notion_key = _wizard_state.get("notion_key", "") or os.environ.get("NOTION_KEY", "") or os.environ.get("NOTION_TOKEN", "")
-        note_title = ""
         if notion_key:
             try:
                 client = NotionClient(notion_key)
                 row = client._api(f"pages/{note_id}", "GET")
                 props = row.get("properties", {})
                 title_items = props.get("Note Name", {}).get("title", [])
-                note_title = "".join(t.get("text", {}).get("content", "") for t in title_items)
+                title = "".join(t.get("text", {}).get("content", "") for t in title_items) or note_id
+                enc_items = props.get("Encrypted Content", {}).get("rich_text", [])
+                encrypted_b64 = "".join(t.get("text", {}).get("content", "") for t in enc_items).strip()
+                # Extract key length from error message if present
+                error_items = props.get("Error Message", {}).get("rich_text", [])
+                error_msg = "".join(t.get("text", {}).get("content", "") for t in error_items)
             except Exception:
                 pass
 
-        def _find_encrypted_in_file(note_file: Path) -> tuple[str, int]:
-            """Extract encrypted base64 and key length from an ENEX file."""
-            from lxml import etree as _etree
-            tree = _etree.parse(str(note_file), parser=_etree.XMLParser(recover=True))
-            root = tree.getroot()
-            note_el = root.find("note") if root.tag != "note" else root
-            content_el = note_el.find("content") if note_el is not None else None
-            content_text = content_el.text or "" if content_el is not None else ""
-            if content_text:
-                enml_root = _etree.fromstring(content_text.encode("utf-8"), parser=_etree.XMLParser(recover=True))
-                for crypt_el in enml_root.iter():
-                    if crypt_el.tag == "en-crypt" or (crypt_el.tag and crypt_el.tag.endswith("en-crypt")):
-                        length_str = crypt_el.attrib.get("length", "128")
-                        kl = int(length_str) if length_str.isdigit() else 128
-                        return (crypt_el.text or "").strip(), kl
-            return "", 128
-
-        if proc_dir.exists():
-            for child in proc_dir.iterdir():
-                if not child.is_dir():
-                    continue
-                notes_dir = child / "notes"
-                if not notes_dir.exists():
-                    continue
-                # First try by note_id filename (works for local processing flow)
-                direct = notes_dir / f"{note_id}.enex"
-                if direct.exists():
-                    try:
-                        encrypted_b64, key_length = _find_encrypted_in_file(direct)
-                    except Exception:
-                        pass
-                    if encrypted_b64:
-                        break
-                # Search by title match (for Notion-sourced exception rows)
-                if note_title:
-                    from lxml import etree as _etree2
-                    for nf in notes_dir.glob("*.enex"):
-                        try:
-                            t = _etree2.parse(str(nf), parser=_etree2.XMLParser(recover=True))
-                            r = t.getroot()
-                            nel = r.find("note") if r.tag != "note" else r
-                            tel = nel.find("title") if nel is not None else None
-                            if tel is not None and (tel.text or "").strip() == note_title:
-                                encrypted_b64, key_length = _find_encrypted_in_file(nf)
-                                break
-                        except Exception:
-                            continue
-                if encrypted_b64:
-                    break
-
         if not encrypted_b64:
-            return templates.TemplateResponse(request=request, name="passwords_result.html", context={"error": "No encrypted content found.", "decrypted": "", "title": note_id})
+            return templates.TemplateResponse(request=request, name="passwords_result.html", context={"error": "No encrypted content found in exception row.", "decrypted": "", "title": title})
 
         try:
             from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes

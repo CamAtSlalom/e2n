@@ -285,6 +285,7 @@ def segments_to_notion_blocks(
                 note_id=note_id,
                 note_title=note_title,
                 error_comment=f"Encrypted content requires passphrase{hint_msg} — cannot be imported automatically",
+                encrypted_content=segment.text,
             )
             exception_records.append(record)
             blocks.append(unsupported_content_marker_block(record))
@@ -708,6 +709,7 @@ def exception_database_properties() -> JsonObject:
         "Evernote Attribute": {"rich_text": {}},
         "Notion Target": {"rich_text": {}},
         "External Resource": {"rich_text": {}},
+        "Encrypted Content": {"rich_text": {}},
     }
 
 
@@ -849,6 +851,7 @@ def create_exception_row(
     link_text: str = "",
     link_value: str = "",
     page_url: str = "",
+    encrypted_content: str = "",
 ) -> str:
     """Create one row in the Import-Exceptions database. Returns the row page_id."""
     properties: JsonObject = {
@@ -866,6 +869,8 @@ def create_exception_row(
         properties["External Resource"] = {"rich_text": [{"text": {"content": link_value[:2000]}}]}
     if page_url:
         properties["Link"] = {"url": page_url}
+    if encrypted_content:
+        properties["Encrypted Content"] = {"rich_text": [{"text": {"content": encrypted_content[:2000]}}]}
 
     body: JsonObject = {
         "parent": {"database_id": exception_database_id},
