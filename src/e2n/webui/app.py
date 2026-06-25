@@ -543,7 +543,7 @@ def create_app() -> FastAPI:
         return exceptions
 
     # Cached exceptions from Notion (invalidated on resolution actions)
-    _cache: dict[str, list[dict] | None] = {"notion_exceptions": None}
+    _cache: dict[str, list[dict] | None] = {"notion_exceptions": None, "exc_db_id": None}
 
     def _invalidate_exceptions_cache():
         _cache["notion_exceptions"] = None
@@ -559,10 +559,14 @@ def create_app() -> FastAPI:
             return []
         try:
             client = NotionClient(notion_key)
-            bootstrap_result = bootstrap_notion_pages(notion_key, root_title=notion_root)
-            exc_db = ensure_exception_database(client, bootstrap_result.exceptions.page_id)
+            # Cache the exceptions database ID to avoid repeated bootstrap calls
+            if not _cache.get("exc_db_id"):
+                bootstrap_result = bootstrap_notion_pages(notion_key, root_title=notion_root)
+                exc_db = ensure_exception_database(client, bootstrap_result.exceptions.page_id)
+                _cache["exc_db_id"] = exc_db.database_id
+            exc_db_id = _cache["exc_db_id"]
             # Query all rows from the exception database
-            results = client._api(f"databases/{exc_db.database_id}/query", "POST", {})
+            results = client._api(f"databases/{exc_db_id}/query", "POST", {})
             exceptions: list[dict] = []
             for page in results.get("results", []):
                 props = page.get("properties", {})
