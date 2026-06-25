@@ -1469,34 +1469,24 @@ def create_app() -> FastAPI:
     @app.get("/passwords/decrypt/{note_id}", response_class=HTMLResponse)
     def passwords_decrypt(request: Request, note_id: str):
         """Decrypt a single password — opens in new tab for easy copy."""
-        # Reuse the existing decrypt view logic
-        exceptions = _load_exceptions_from_notion() or _load_exceptions_from_processing()
-        note_exceptions = [e for e in exceptions if e["note_id"] == note_id]
+        # Get title and hint from the exception row directly
+        notion_key = _wizard_state.get("notion_key", "") or os.environ.get("NOTION_KEY", "") or os.environ.get("NOTION_TOKEN", "")
+        title = note_id
         hint = ""
-        proc_dir = Path(_wizard_state.get("processing_directory", "")).expanduser().resolve()
-        if proc_dir.exists():
-            for child in proc_dir.iterdir():
-                if not child.is_dir():
-                    continue
-                note_file = child / "notes" / f"{note_id}.enex"
-                if note_file.exists():
-                    from lxml import etree as _etree
-                    tree = _etree.parse(str(note_file), parser=_etree.XMLParser(recover=True))
-                    root = tree.getroot()
-                    note_el = root.find("note") if root.tag != "note" else root
-                    content_el = note_el.find("content") if note_el is not None else None
-                    content_text = content_el.text or "" if content_el is not None else ""
-                    if content_text:
-                        try:
-                            enml_root = _etree.fromstring(content_text.encode("utf-8"), parser=_etree.XMLParser(recover=True))
-                            for crypt_el in enml_root.iter():
-                                if crypt_el.tag == "en-crypt" or (crypt_el.tag and crypt_el.tag.endswith("en-crypt")):
-                                    hint = crypt_el.attrib.get("hint", "")
-                                    break
-                        except Exception:
-                            pass
-                    break
-        title = note_exceptions[0]["title"] if note_exceptions else note_id
+        if notion_key:
+            try:
+                client = NotionClient(notion_key)
+                row = client._api(f"pages/{note_id}", "GET")
+                props = row.get("properties", {})
+                title_items = props.get("Note Name", {}).get("title", [])
+                title = "".join(t.get("text", {}).get("content", "") for t in title_items) or note_id
+                error_items = props.get("Error Message", {}).get("rich_text", [])
+                error_msg = "".join(t.get("text", {}).get("content", "") for t in error_items)
+                # Extract hint from error message: "(hint: X)"
+                if "(hint:" in error_msg:
+                    hint = error_msg.split("(hint:")[1].split(")")[0].strip()
+            except Exception:
+                pass
         return templates.TemplateResponse(
             request=request,
             name="passwords_decrypt.html",
@@ -1511,29 +1501,67 @@ def create_app() -> FastAPI:
         encrypted_b64 = ""
         key_length = 128
 
+        # Get the note title from the exception row to find the correct ENEX file
+        notion_key = _wizard_state.get("notion_key", "") or os.environ.get("NOTION_KEY", "") or os.environ.get("NOTION_TOKEN", "")
+        note_title = ""
+        if notion_key:
+            try:
+                client = NotionClient(notion_key)
+                row = client._api(f"pages/{note_id}", "GET")
+                props = row.get("properties", {})
+                title_items = props.get("Note Name", {}).get("title", [])
+                note_title = "".join(t.get("text", {}).get("content", "") for t in title_items)
+            except Exception:
+                pass
+
+        def _find_encrypted_in_file(note_file: Path) -> tuple[str, int]:
+            """Extract encrypted base64 and key length from an ENEX file."""
+            from lxml import etree as _etree
+            tree = _etree.parse(str(note_file), parser=_etree.XMLParser(recover=True))
+            root = tree.getroot()
+            note_el = root.find("note") if root.tag != "note" else root
+            content_el = note_el.find("content") if note_el is not None else None
+            content_text = content_el.text or "" if content_el is not None else ""
+            if content_text:
+                enml_root = _etree.fromstring(content_text.encode("utf-8"), parser=_etree.XMLParser(recover=True))
+                for crypt_el in enml_root.iter():
+                    if crypt_el.tag == "en-crypt" or (crypt_el.tag and crypt_el.tag.endswith("en-crypt")):
+                        length_str = crypt_el.attrib.get("length", "128")
+                        kl = int(length_str) if length_str.isdigit() else 128
+                        return (crypt_el.text or "").strip(), kl
+            return "", 128
+
         if proc_dir.exists():
             for child in proc_dir.iterdir():
                 if not child.is_dir():
                     continue
-                note_file = child / "notes" / f"{note_id}.enex"
-                if note_file.exists():
-                    from lxml import etree as _etree
-                    tree = _etree.parse(str(note_file), parser=_etree.XMLParser(recover=True))
-                    root = tree.getroot()
-                    note_el = root.find("note") if root.tag != "note" else root
-                    content_el = note_el.find("content") if note_el is not None else None
-                    content_text = content_el.text or "" if content_el is not None else ""
-                    if content_text:
+                notes_dir = child / "notes"
+                if not notes_dir.exists():
+                    continue
+                # First try by note_id filename (works for local processing flow)
+                direct = notes_dir / f"{note_id}.enex"
+                if direct.exists():
+                    try:
+                        encrypted_b64, key_length = _find_encrypted_in_file(direct)
+                    except Exception:
+                        pass
+                    if encrypted_b64:
+                        break
+                # Search by title match (for Notion-sourced exception rows)
+                if note_title:
+                    from lxml import etree as _etree2
+                    for nf in notes_dir.glob("*.enex"):
                         try:
-                            enml_root = _etree.fromstring(content_text.encode("utf-8"), parser=_etree.XMLParser(recover=True))
-                            for crypt_el in enml_root.iter():
-                                if crypt_el.tag == "en-crypt" or (crypt_el.tag and crypt_el.tag.endswith("en-crypt")):
-                                    length_str = crypt_el.attrib.get("length", "128")
-                                    key_length = int(length_str) if length_str.isdigit() else 128
-                                    encrypted_b64 = (crypt_el.text or "").strip()
-                                    break
+                            t = _etree2.parse(str(nf), parser=_etree2.XMLParser(recover=True))
+                            r = t.getroot()
+                            nel = r.find("note") if r.tag != "note" else r
+                            tel = nel.find("title") if nel is not None else None
+                            if tel is not None and (tel.text or "").strip() == note_title:
+                                encrypted_b64, key_length = _find_encrypted_in_file(nf)
+                                break
                         except Exception:
-                            pass
+                            continue
+                if encrypted_b64:
                     break
 
         if not encrypted_b64:
