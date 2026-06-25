@@ -1204,7 +1204,7 @@ def create_app() -> FastAPI:
                     for block in children:
                         if block.get("type") in ("callout", "paragraph", "quote", "heading_1", "heading_2", "heading_3"):
                             block_text = "".join(rt.get("text", {}).get("content", "") for rt in block.get(block.get("type", ""), {}).get("rich_text", []))
-                            if page_name in block_text:
+                            if page_name.lower() in block_text.lower():
                                 client.update_block_with_page_link(block["id"], page_name, target_url)
                                 resolved_this += 1
                                 total_resolved += 1
@@ -1277,7 +1277,7 @@ def create_app() -> FastAPI:
                         block_text = "".join(
                             rt.get("text", {}).get("content", "") for rt in block.get("callout", {}).get("rich_text", [])
                         )
-                        if page_name in block_text:
+                        if page_name.lower() in block_text.lower():
                             # Replace callout with inline link
                             client.update_block_with_page_link(block["id"], page_name, target_url)
                             # Update exception row: Status=Resolved, Link=new block URL
