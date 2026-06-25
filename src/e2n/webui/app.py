@@ -622,6 +622,12 @@ def create_app() -> FastAPI:
         except Exception:
             return []
 
+    @app.post("/refresh")
+    def refresh_page(request: Request, redirect: str = Form("/")):
+        """Invalidate exceptions cache and redirect back to the calling page."""
+        _invalidate_exceptions_cache()
+        return RedirectResponse(url=redirect, status_code=303)
+
     @app.get("/resolve/", response_class=HTMLResponse)
     def resolve_dashboard(request: Request):
         exceptions = _load_exceptions_from_notion() or _load_exceptions_from_processing()
