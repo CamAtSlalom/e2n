@@ -1097,14 +1097,19 @@ def create_app() -> FastAPI:
         """Show unique link targets and how many exceptions reference each."""
         exceptions = _load_exceptions_from_notion() or _load_exceptions_from_processing()
         link_exceptions = [e for e in exceptions if "Evernote Link" in e["reasons"]]
-        # Group by link_text (the target page name)
-        targets: dict[str, int] = {}
+        # Group by link_text (the target page name), track source pages
+        targets: dict[str, dict] = {}
         for exc in link_exceptions:
             lt = exc.get("link_text", "").strip()
             if lt:
-                targets[lt] = targets.get(lt, 0) + 1
+                if lt not in targets:
+                    targets[lt] = {"count": 0, "sources": []}
+                targets[lt]["count"] += 1
+                src_title = exc.get("title", "")
+                if src_title and src_title not in targets[lt]["sources"]:
+                    targets[lt]["sources"].append(src_title)
         # Sort by count desc, then alpha
-        sorted_targets = sorted(targets.items(), key=lambda x: (-x[1], x[0]))
+        sorted_targets = sorted(targets.items(), key=lambda x: (-x[1]["count"], x[0]))
         return templates.TemplateResponse(
             request=request,
             name="links.html",
