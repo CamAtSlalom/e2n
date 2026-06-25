@@ -1057,8 +1057,77 @@ def create_app() -> FastAPI:
             context={"targets": sorted_targets, "total_links": len(link_exceptions), "total_targets": len(targets)},
         )
 
+    @app.post("/links/resolve-all", response_class=HTMLResponse)
+    def links_resolve_all(request: Request):
+        """Auto-resolve all link targets from most-referenced to least."""
+        import logging
+        link_log = logging.getLogger("e2n.webui.links")
+
+        notion_key = _wizard_state.get("notion_key", "")
+        if not notion_key:
+            return templates.TemplateResponse(
+                request=request, name="links_result.html",
+                context={"error": "No Notion key configured.", "page_name": "ALL", "resolved": 0, "failed": 0, "results": []},
+            )
+
+        client = NotionClient(notion_key)
+        exceptions = _load_exceptions_from_processing()
+        link_exceptions = [e for e in exceptions if "Evernote Link" in e["reasons"]]
+
+        # Group by target and sort by count desc
+        targets: dict[str, list] = {}
+        for exc in link_exceptions:
+            lt = exc.get("link_text", "").strip()
+            if lt:
+                targets.setdefault(lt, []).append(exc)
+        sorted_targets = sorted(targets.items(), key=lambda x: -len(x[1]))
+
+        total_resolved = 0
+        total_failed = 0
+        results: list[dict] = []
+
+        for page_name, refs in sorted_targets:
+            # Find target page
+            target_matches = [p for p in client.search_pages(page_name) if p.title == page_name]
+            if not target_matches:
+                total_failed += len(refs)
+                results.append({"title": page_name, "status": "skipped", "reason": f"page not found ({len(refs)} refs)"})
+                continue
+
+            target_page = target_matches[0]
+            target_url = target_page.url or f"https://www.notion.so/{target_page.page_id.replace('-', '')}"
+
+            resolved_this = 0
+            for exc in refs:
+                note_title = exc["title"]
+                try:
+                    note_pages = [p for p in client.search_pages(note_title) if p.title == note_title]
+                    if not note_pages:
+                        total_failed += 1
+                        continue
+                    children = client.list_block_children(note_pages[0].page_id)
+                    for block in children:
+                        if block.get("type") == "callout":
+                            block_text = "".join(rt.get("text", {}).get("content", "") for rt in block.get("callout", {}).get("rich_text", []))
+                            if page_name in block_text:
+                                client.update_block_with_page_link(block["id"], page_name, target_url)
+                                resolved_this += 1
+                                total_resolved += 1
+                                break
+                except Exception:
+                    total_failed += 1
+
+            results.append({"title": page_name, "status": "resolved" if resolved_this > 0 else "partial", "reason": f"resolved {resolved_this}/{len(refs)}"})
+            link_log.info("  %s: resolved %d/%d", page_name, resolved_this, len(refs))
+
+        link_log.info("Resolve-all complete: resolved=%d, failed=%d", total_resolved, total_failed)
+        return templates.TemplateResponse(
+            request=request, name="links_result.html",
+            context={"error": "", "page_name": "ALL LINKS", "resolved": total_resolved, "failed": total_failed, "results": results},
+        )
+
     @app.post("/links/resolve", response_class=HTMLResponse)
-    def links_resolve(request: Request, page_name: str = Form(...), search_source: str = Form("Evernote Import")):
+    def links_resolve(request: Request, page_name: str = Form(...), search_source: str = Form("Evernote Import"), override_target: str = Form("")):
         """Resolve all Evernote Link exceptions that reference a given page name."""
         import logging
         link_log = logging.getLogger("e2n.webui.links")
@@ -1072,12 +1141,13 @@ def create_app() -> FastAPI:
 
         client = NotionClient(notion_key)
 
-        # Step 1: Find the target page in Notion
-        target_matches = [p for p in client.search_pages(page_name) if p.title == page_name]
+        # Step 1: Find the target page — use override if provided (for orphan links)
+        search_name = override_target.strip() if override_target.strip() else page_name
+        target_matches = [p for p in client.search_pages(search_name) if p.title == search_name]
         if not target_matches:
             return templates.TemplateResponse(
                 request=request, name="links_result.html",
-                context={"error": f"Page '{page_name}' not found in Notion.", "page_name": page_name, "resolved": 0, "failed": 0, "results": []},
+                context={"error": f"Page '{search_name}' not found in Notion.", "page_name": page_name, "resolved": 0, "failed": 0, "results": []},
             )
         target_page = target_matches[0]
         target_url = target_page.url or f"https://www.notion.so/{target_page.page_id.replace('-', '')}"
