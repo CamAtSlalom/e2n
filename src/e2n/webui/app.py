@@ -1320,8 +1320,39 @@ def create_app() -> FastAPI:
     @app.get("/passwords/", response_class=HTMLResponse)
     def passwords_home(request: Request):
         """First-class password management — lists all encrypted items from Import-Exceptions."""
-        exceptions = _load_exceptions_from_notion() or _load_exceptions_from_processing()
-        encrypted = [e for e in exceptions if "Encrypted" in e["reasons"] or "Encrypted" in e.get("error_message", "")]
+        # Load ALL exceptions (including resolved) for password audit view
+        notion_key = _wizard_state.get("notion_key", "") or os.environ.get("NOTION_KEY", "") or os.environ.get("NOTION_TOKEN", "")
+        notion_root = _wizard_state.get("notion_root", "") or os.environ.get("NOTION_ROOT", "")
+        all_exceptions: list[dict] = []
+        if notion_key and notion_root:
+            try:
+                client = NotionClient(notion_key)
+                exc_db_id = _cache.get("exc_db_id")
+                if not exc_db_id:
+                    br = bootstrap_notion_pages(notion_key, root_title=notion_root)
+                    exc_db = ensure_exception_database(client, br.exceptions.page_id)
+                    exc_db_id = exc_db.database_id
+                    _cache["exc_db_id"] = exc_db_id
+                results = client._api(f"databases/{exc_db_id}/query", "POST", {})
+                for page in results.get("results", []):
+                    props = page.get("properties", {})
+                    title_items = props.get("Note Name", {}).get("title", [])
+                    title = "".join(t.get("text", {}).get("content", "") for t in title_items)
+                    reason_items = props.get("Reason", {}).get("multi_select", [])
+                    reasons = ",".join(r.get("name", "") for r in reason_items)
+                    status_obj = props.get("Status", {}).get("select")
+                    status = status_obj.get("name", "") if status_obj else "Open"
+                    error_items = props.get("Error Message", {}).get("rich_text", [])
+                    error_msg = "".join(t.get("text", {}).get("content", "") for t in error_items)
+                    all_exceptions.append({
+                        "note_id": page["id"], "title": title, "reasons": reasons,
+                        "error_message": error_msg, "status": status,
+                    })
+            except Exception:
+                pass
+        if not all_exceptions:
+            all_exceptions = _load_exceptions_from_processing()
+        encrypted = [e for e in all_exceptions if "Encrypted" in e.get("reasons", "") or "Encrypted" in e.get("error_message", "")]
         return templates.TemplateResponse(
             request=request,
             name="passwords.html",
