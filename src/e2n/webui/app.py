@@ -1036,6 +1036,123 @@ def create_app() -> FastAPI:
 
         return RedirectResponse(url="/resolve/", status_code=303)
 
+    # --- Evernote Link Management (first-class feature) ---
+
+    @app.get("/links/", response_class=HTMLResponse)
+    def links_home(request: Request):
+        """Show unique link targets and how many exceptions reference each."""
+        exceptions = _load_exceptions_from_processing()
+        link_exceptions = [e for e in exceptions if "Evernote Link" in e["reasons"]]
+        # Group by link_text (the target page name)
+        targets: dict[str, int] = {}
+        for exc in link_exceptions:
+            lt = exc.get("link_text", "").strip()
+            if lt:
+                targets[lt] = targets.get(lt, 0) + 1
+        # Sort by count desc, then alpha
+        sorted_targets = sorted(targets.items(), key=lambda x: (-x[1], x[0]))
+        return templates.TemplateResponse(
+            request=request,
+            name="links.html",
+            context={"targets": sorted_targets, "total_links": len(link_exceptions), "total_targets": len(targets)},
+        )
+
+    @app.post("/links/resolve", response_class=HTMLResponse)
+    def links_resolve(request: Request, page_name: str = Form(...), search_source: str = Form("Evernote Import")):
+        """Resolve all Evernote Link exceptions that reference a given page name."""
+        import logging
+        link_log = logging.getLogger("e2n.webui.links")
+
+        notion_key = _wizard_state.get("notion_key", "")
+        if not notion_key:
+            return templates.TemplateResponse(
+                request=request, name="links_result.html",
+                context={"error": "No Notion key configured.", "page_name": page_name, "resolved": 0, "failed": 0, "results": []},
+            )
+
+        client = NotionClient(notion_key)
+
+        # Step 1: Find the target page in Notion
+        target_matches = [p for p in client.search_pages(page_name) if p.title == page_name]
+        if not target_matches:
+            return templates.TemplateResponse(
+                request=request, name="links_result.html",
+                context={"error": f"Page '{page_name}' not found in Notion.", "page_name": page_name, "resolved": 0, "failed": 0, "results": []},
+            )
+        target_page = target_matches[0]
+        target_url = target_page.url or f"https://www.notion.so/{target_page.page_id.replace('-', '')}"
+        link_log.info("Target page found: %s (%s)", page_name, target_page.page_id)
+
+        # Step 2: Find all exception records referencing this page name
+        exceptions = _load_exceptions_from_processing()
+        referencing = [e for e in exceptions if "Evernote Link" in e["reasons"] and e.get("link_text", "").strip() == page_name]
+        link_log.info("Found %d exceptions referencing '%s'", len(referencing), page_name)
+
+        # Step 3: For each referencing note, replace the callout with an inline link
+        resolved = 0
+        failed = 0
+        results: list[dict] = []
+
+        for exc in referencing:
+            note_title = exc["title"]
+            try:
+                # Find the referencing note's page
+                note_pages = [p for p in client.search_pages(note_title) if p.title == note_title]
+                if not note_pages:
+                    failed += 1
+                    results.append({"title": note_title, "status": "failed", "reason": "page not found"})
+                    continue
+
+                note_page = note_pages[0]
+                # Find the callout block containing this link text
+                children = client.list_block_children(note_page.page_id)
+                replaced = False
+                for block in children:
+                    if block.get("type") == "callout":
+                        block_text = "".join(
+                            rt.get("text", {}).get("content", "") for rt in block.get("callout", {}).get("rich_text", [])
+                        )
+                        if page_name in block_text:
+                            # Replace callout with inline link
+                            client.update_block_with_page_link(block["id"], page_name, target_url)
+                            # Update exception row: Status=Resolved, Link=new block URL
+                            block_id_clean = block["id"].replace("-", "")
+                            page_id_clean = note_page.page_id.replace("-", "")
+                            new_link = f"https://www.notion.so/{page_id_clean}#{block_id_clean}"
+                            # Find and update exception row in Notion
+                            try:
+                                all_exc_matches = client.search_pages(note_title)
+                                for p in all_exc_matches:
+                                    if p.title == note_title:
+                                        try:
+                                            client._sdk_call(
+                                                client._sdk_client.pages.update,
+                                                page_id=p.page_id,
+                                                properties={"Status": {"select": {"name": "Resolved"}}, "Link": {"url": new_link}},
+                                            )
+                                        except Exception:
+                                            pass
+                            except Exception:
+                                pass
+                            replaced = True
+                            resolved += 1
+                            results.append({"title": note_title, "status": "resolved", "reason": f"→ linked to {page_name}"})
+                            break
+
+                if not replaced:
+                    failed += 1
+                    results.append({"title": note_title, "status": "failed", "reason": "callout block not found on page"})
+
+            except Exception as exc_err:
+                failed += 1
+                results.append({"title": note_title, "status": "failed", "reason": str(exc_err)[:100]})
+
+        link_log.info("Link resolution complete: resolved=%d, failed=%d", resolved, failed)
+        return templates.TemplateResponse(
+            request=request, name="links_result.html",
+            context={"error": "", "page_name": page_name, "resolved": resolved, "failed": failed, "results": results},
+        )
+
     # --- Trivial resolution routes ---
 
     @app.get("/resolve/passwords", response_class=HTMLResponse)
