@@ -676,7 +676,7 @@ def create_app() -> FastAPI:
     # --- Individual resolution actions ---
 
     @app.post("/resolve/acknowledge/{note_id}")
-    def resolve_acknowledge(request: Request, note_id: str, block_id: str = Form("")):
+    def resolve_acknowledge(request: Request, note_id: str, block_id: str = Form(default="")):
         notion_key = _wizard_state.get("notion_key", "")
         if not notion_key:
             return RedirectResponse(url="/resolve/", status_code=303)
