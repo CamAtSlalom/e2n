@@ -684,8 +684,17 @@ def create_app() -> FastAPI:
                 results.append({"title": exc["title"], "link_text": link_text, "status": "skipped", "reason": "no link text"})
                 continue
 
-            matches = [p for p in client.search_pages(link_text) if p.title == link_text]
-            relink_log.info("  Link '%s': %d exact match(es)", link_text, len(matches))
+            all_found = [p for p in client.search_pages(link_text) if p.title == link_text]
+            # Exclude exceptions database pages
+            notion_root_ar = _wizard_state.get("notion_root", "") or os.environ.get("NOTION_ROOT", "")
+            exc_pid = ""
+            try:
+                br_ar = bootstrap_notion_pages(notion_key, root_title=notion_root_ar if notion_root_ar else None)
+                exc_pid = br_ar.exceptions.page_id
+            except Exception:
+                pass
+            matches = [p for p in all_found if p.parent_page_id != exc_pid] if exc_pid else all_found
+            relink_log.info("  Link '%s': %d match(es) in imports", link_text, len(matches))
 
             if len(matches) == 1:
                 target_page = matches[0]
@@ -1127,12 +1136,22 @@ def create_app() -> FastAPI:
         total_failed = 0
         results: list[dict] = []
 
+        # Get exceptions page_id to exclude from searches
+        notion_root = _wizard_state.get("notion_root", "") or os.environ.get("NOTION_ROOT", "")
+        exc_page_id = ""
+        try:
+            br = bootstrap_notion_pages(notion_key, root_title=notion_root if notion_root else None)
+            exc_page_id = br.exceptions.page_id
+        except Exception:
+            pass
+
         for page_name, refs in sorted_targets:
-            # Find target page
-            target_matches = [p for p in client.search_pages(page_name) if p.title == page_name]
+            # Find target page in import databases (exclude exceptions)
+            all_matches = [p for p in client.search_pages(page_name) if p.title == page_name]
+            target_matches = [p for p in all_matches if p.parent_page_id != exc_page_id] if exc_page_id else all_matches
             if not target_matches:
                 total_failed += len(refs)
-                results.append({"title": page_name, "status": "skipped", "reason": f"page not found ({len(refs)} refs)"})
+                results.append({"title": page_name, "status": "skipped", "reason": f"page not found in imports ({len(refs)} refs)"})
                 continue
 
             target_page = target_matches[0]
@@ -1182,13 +1201,22 @@ def create_app() -> FastAPI:
 
         client = NotionClient(notion_key)
 
-        # Step 1: Find the target page — use override if provided (for orphan links)
+        # Step 1: Find the target page in IMPORT databases (exclude Import-Exceptions)
         search_name = override_target.strip() if override_target.strip() else page_name
-        target_matches = [p for p in client.search_pages(search_name) if p.title == search_name]
+        all_matches = [p for p in client.search_pages(search_name) if p.title == search_name]
+        # Exclude pages under Import-Exceptions (those are exception rows, not imported pages)
+        notion_root = _wizard_state.get("notion_root", "") or os.environ.get("NOTION_ROOT", "")
+        exc_page_id = ""
+        try:
+            bootstrap_result = bootstrap_notion_pages(notion_key, root_title=notion_root if notion_root else None)
+            exc_page_id = bootstrap_result.exceptions.page_id
+        except Exception:
+            pass
+        target_matches = [p for p in all_matches if p.parent_page_id != exc_page_id] if exc_page_id else all_matches
         if not target_matches:
             return templates.TemplateResponse(
                 request=request, name="links_result.html",
-                context={"error": f"Page '{search_name}' not found in Notion.", "page_name": page_name, "resolved": 0, "failed": 0, "results": []},
+                context={"error": f"Page '{search_name}' not found in import databases (only found in exceptions).", "page_name": page_name, "resolved": 0, "failed": 0, "results": []},
             )
         target_page = target_matches[0]
         target_url = target_page.url or f"https://www.notion.so/{target_page.page_id.replace('-', '')}"
