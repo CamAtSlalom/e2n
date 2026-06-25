@@ -967,15 +967,65 @@ def create_app() -> FastAPI:
         except Exception:
             return RedirectResponse(url=f"/resolve/decrypt/{note_id}", status_code=303)
 
-        # Insert decrypted content as paragraph block and delete marker
+        # Insert decrypted content as paragraph block, delete marker, mark resolved
         notion_key = _wizard_state.get("notion_key", "")
-        if notion_key and page_id:
+        if notion_key:
             from e2n.notion import paragraph_block, plain_text_span
             client = NotionClient(notion_key)
-            block = paragraph_block([plain_text_span(decrypted_text[:2000])])
-            client._sdk_call(client._sdk_client.blocks.children.append, block_id=page_id, children=[block])
-            if block_id:
-                client.delete_block(block_id)
+
+            # If we don't have page_id/block_id from form, look them up
+            if not page_id or not block_id:
+                exceptions = _load_exceptions_from_processing()
+                note_exc = [e for e in exceptions if e["note_id"] == note_id]
+                note_title = note_exc[0]["title"] if note_exc else ""
+                if note_title:
+                    pages_found = [p for p in client.search_pages(note_title) if p.title == note_title]
+                    if pages_found:
+                        page_id = pages_found[0].page_id
+                        children = client.list_block_children(page_id)
+                        for blk in children:
+                            if blk.get("type") == "callout":
+                                blk_text = "".join(rt.get("text", {}).get("content", "") for rt in blk.get("callout", {}).get("rich_text", []))
+                                if "Encrypted" in blk_text or "passphrase" in blk_text:
+                                    block_id = blk["id"]
+                                    break
+
+            if page_id and block_id:
+                # Replace the callout with decrypted content (update block to paragraph)
+                try:
+                    client._sdk_call(
+                        client._sdk_client.blocks.update,
+                        block_id=block_id,
+                        paragraph={"rich_text": [{"type": "text", "text": {"content": decrypted_text[:2000]}}]},
+                    )
+                except Exception:
+                    # Fallback: append new block and delete old
+                    block = paragraph_block([plain_text_span(decrypted_text[:2000])])
+                    client._sdk_call(client._sdk_client.blocks.children.append, block_id=page_id, children=[block])
+                    client.delete_block(block_id)
+
+                # Mark exception row as Resolved
+                page_id_clean = page_id.replace("-", "")
+                block_id_clean = block_id.replace("-", "")
+                resolved_url = f"https://www.notion.so/{page_id_clean}#{block_id_clean}"
+                try:
+                    exceptions = _load_exceptions_from_processing()
+                    note_exc = [e for e in exceptions if e["note_id"] == note_id]
+                    note_title = note_exc[0]["title"] if note_exc else ""
+                    if note_title:
+                        all_matches = client.search_pages(note_title)
+                        for p in all_matches:
+                            if p.title == note_title:
+                                try:
+                                    client._sdk_call(
+                                        client._sdk_client.pages.update,
+                                        page_id=p.page_id,
+                                        properties={"Status": {"select": {"name": "Resolved"}}, "Link": {"url": resolved_url}},
+                                    )
+                                except Exception:
+                                    pass
+                except Exception:
+                    pass
 
         return RedirectResponse(url="/resolve/", status_code=303)
 
