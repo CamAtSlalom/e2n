@@ -1253,61 +1253,55 @@ def create_app() -> FastAPI:
         referencing = [e for e in exceptions if "Evernote Link" in e["reasons"] and e.get("link_text", "").strip() == page_name]
         link_log.info("Found %d exceptions referencing '%s'", len(referencing), page_name)
 
-        # Step 3: For each referencing note, replace the callout with an inline link
+        # Step 3: Use Import-Exceptions Link field for direct block access
         resolved = 0
         failed = 0
         results: list[dict] = []
 
         for exc in referencing:
             note_title = exc["title"]
+            block_url = exc.get("block_url", "")
+            exc_row_id = exc.get("note_id", "")
+
+            # Extract block_id from Link URL
+            block_id = ""
+            if "#" in block_url:
+                block_id_raw = block_url.split("#")[-1]
+                if len(block_id_raw) == 32:
+                    block_id = f"{block_id_raw[:8]}-{block_id_raw[8:12]}-{block_id_raw[12:16]}-{block_id_raw[16:20]}-{block_id_raw[20:]}"
+                else:
+                    block_id = block_id_raw
+
+            # Fallback: scan page blocks
+            if not block_id:
+                try:
+                    note_pages = [p for p in client.search_pages(note_title) if p.title == note_title]
+                    if note_pages:
+                        children = client.list_block_children(note_pages[0].page_id)
+                        for block in children:
+                            btype = block.get("type", "")
+                            if btype in ("callout", "paragraph"):
+                                bt = "".join(rt.get("text", {}).get("content", "") for rt in block.get(btype, {}).get("rich_text", []))
+                                if page_name.lower() in bt.lower():
+                                    block_id = block["id"]
+                                    break
+                except Exception:
+                    pass
+
+            if not block_id:
+                failed += 1
+                results.append({"title": note_title, "status": "failed", "reason": "no block reference"})
+                continue
+
             try:
-                # Find the referencing note's page
-                note_pages = [p for p in client.search_pages(note_title) if p.title == note_title]
-                if not note_pages:
-                    failed += 1
-                    results.append({"title": note_title, "status": "failed", "reason": "page not found"})
-                    continue
-
-                note_page = note_pages[0]
-                # Find the callout block containing this link text
-                children = client.list_block_children(note_page.page_id)
-                replaced = False
-                for block in children:
-                    if block.get("type") in ("callout", "paragraph", "quote", "heading_1", "heading_2", "heading_3"):
-                        block_text = "".join(
-                            rt.get("text", {}).get("content", "") for rt in block.get("callout", {}).get("rich_text", [])
-                        )
-                        if page_name.lower() in block_text.lower():
-                            # Replace callout with inline link
-                            client.update_block_with_page_link(block["id"], page_name, target_url)
-                            # Update exception row: Status=Resolved, Link=new block URL
-                            block_id_clean = block["id"].replace("-", "")
-                            page_id_clean = note_page.page_id.replace("-", "")
-                            new_link = f"https://www.notion.so/{page_id_clean}#{block_id_clean}"
-                            # Find and update exception row in Notion
-                            try:
-                                all_exc_matches = client.search_pages(note_title)
-                                for p in all_exc_matches:
-                                    if p.title == note_title:
-                                        try:
-                                            client._sdk_call(
-                                                client._sdk_client.pages.update,
-                                                page_id=p.page_id,
-                                                properties={"Status": {"select": {"name": "Resolved"}}, "Link": {"url": new_link}},
-                                            )
-                                        except Exception:
-                                            pass
-                            except Exception:
-                                pass
-                            replaced = True
-                            resolved += 1
-                            results.append({"title": note_title, "status": "resolved", "reason": f"→ linked to {page_name}"})
-                            break
-
-                if not replaced:
-                    failed += 1
-                    results.append({"title": note_title, "status": "failed", "reason": "callout block not found on page"})
-
+                client.update_block_with_page_link(block_id, page_name, target_url)
+                if exc_row_id:
+                    try:
+                        client._sdk_call(client._sdk_client.pages.update, page_id=exc_row_id, properties={"Status": {"select": {"name": "Resolved"}}, "Link": {"url": block_url or target_url}})
+                    except Exception:
+                        pass
+                resolved += 1
+                results.append({"title": note_title, "status": "resolved", "reason": f"-> {search_name}"})
             except Exception as exc_err:
                 failed += 1
                 results.append({"title": note_title, "status": "failed", "reason": str(exc_err)[:100]})
