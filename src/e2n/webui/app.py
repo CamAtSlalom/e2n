@@ -162,6 +162,11 @@ def create_app() -> FastAPI:
         _wizard_state["notion_key"] = os.environ.get("NOTION_KEY", "") or os.environ.get("NOTION_TOKEN", "")
     if os.environ.get("NOTION_ROOT"):
         _wizard_state["notion_root"] = os.environ.get("NOTION_ROOT", "")
+    # Ensure env vars are set from persisted config for session lifetime
+    if _wizard_state.get("notion_key") and not os.environ.get("NOTION_KEY"):
+        os.environ["NOTION_KEY"] = _wizard_state["notion_key"]
+    if _wizard_state.get("notion_root") and not os.environ.get("NOTION_ROOT"):
+        os.environ["NOTION_ROOT"] = _wizard_state["notion_root"]
 
     @app.get("/wizard/", response_class=HTMLResponse)
     def wizard_root(request: Request) -> HTMLResponse:
@@ -228,6 +233,8 @@ def create_app() -> FastAPI:
             _wizard_state["notion_key"] = notion_key.strip()
             _wizard_state["notion_root"] = notion_root.strip()
             _wizard_state["step2_complete"] = "true"
+            os.environ["NOTION_KEY"] = notion_key.strip()
+            os.environ["NOTION_ROOT"] = notion_root.strip()
             _save_wizard_config()
             return RedirectResponse(url="/wizard/step/3", status_code=303)
         except Exception as exc:
