@@ -700,7 +700,7 @@ def create_app() -> FastAPI:
                 exc_db_id = exc_db_obj.database_id
             except Exception:
                 pass
-            matches = [p for p in all_found if p.parent_page_id not in (exc_pid, exc_db_id)] if (exc_pid or exc_db_id) else all_found
+            matches = [p for p in all_found if getattr(p, "parent_database_id", "") != exc_db_id] if exc_db_id else all_found
             relink_log.info("  Link '%s': %d match(es) in imports", link_text, len(matches))
 
             if len(matches) == 1:
@@ -1163,7 +1163,7 @@ def create_app() -> FastAPI:
         for page_name, refs in sorted_targets:
             # Find target page in import databases (exclude exceptions)
             all_matches = [p for p in client.search_pages(page_name) if p.title == page_name]
-            target_matches = [p for p in all_matches if p.parent_page_id not in (exc_page_id, exc_db_id_excl)] if (exc_page_id or exc_db_id_excl) else all_matches
+            target_matches = [p for p in all_matches if getattr(p, "parent_database_id", "") != exc_db_id_excl] if exc_db_id_excl else all_matches
             if not target_matches:
                 total_failed += len(refs)
                 results.append({"title": page_name, "status": "skipped", "reason": f"page not found in imports ({len(refs)} refs)"})
@@ -1230,7 +1230,7 @@ def create_app() -> FastAPI:
             exc_db_id_excl = exc_db_obj.database_id
         except Exception:
             pass
-        target_matches = [p for p in all_matches if p.parent_page_id not in (exc_page_id, exc_db_id_excl)] if (exc_page_id or exc_db_id_excl) else all_matches
+        target_matches = [p for p in all_matches if getattr(p, "parent_database_id", "") != exc_db_id_excl] if exc_db_id_excl else all_matches
         if not target_matches:
             return templates.TemplateResponse(
                 request=request, name="links_result.html",
