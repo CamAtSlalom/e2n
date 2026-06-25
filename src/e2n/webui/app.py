@@ -821,10 +821,34 @@ def create_app() -> FastAPI:
             decrypted_bytes = unpadder.update(padded) + unpadder.finalize()
             decrypted_text = decrypted_bytes.decode("utf-8")
 
+            # Look up the page and block_id for resolution actions
+            page_id = ""
+            block_id = ""
+            notion_key = _wizard_state.get("notion_key", "")
+            if notion_key:
+                try:
+                    resolve_client = NotionClient(notion_key)
+                    exceptions = _load_exceptions_from_processing()
+                    note_exc = [e for e in exceptions if e["note_id"] == note_id]
+                    note_title = note_exc[0]["title"] if note_exc else ""
+                    if note_title:
+                        pages_found = [p for p in resolve_client.search_pages(note_title) if p.title == note_title]
+                        if pages_found:
+                            page_id = pages_found[0].page_id
+                            children = resolve_client.list_block_children(page_id)
+                            for blk in children:
+                                if blk.get("type") == "callout":
+                                    block_text = "".join(rt.get("text", {}).get("content", "") for rt in blk.get("callout", {}).get("rich_text", []))
+                                    if "Encrypted" in block_text or "passphrase" in block_text:
+                                        block_id = blk["id"]
+                                        break
+                except Exception:
+                    pass
+
             return templates.TemplateResponse(
                 request=request,
                 name="resolve_decrypt_result.html",
-                context={"note_id": note_id, "hint": hint, "error": "", "decrypted": decrypted_text, "passphrase": passphrase},
+                context={"note_id": note_id, "hint": hint, "error": "", "decrypted": decrypted_text, "passphrase": passphrase, "page_id": page_id, "block_id": block_id},
             )
         except Exception as exc:
             error_msg = str(exc)
