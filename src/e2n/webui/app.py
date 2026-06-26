@@ -788,7 +788,7 @@ def create_app() -> FastAPI:
                         client.update_block_with_page_link(block_id, link_text, target_url)
                         if exc_row_id:
                             try:
-                                client._sdk_call(client._sdk_client.pages.update, page_id=exc_row_id, properties={"Status": {"select": {"name": "Resolved"}}, "Link": {"url": block_url}})
+                                import httpx as _hx; _hx.patch(f"https://api.notion.com/v1/pages/{exc_row_id}", headers={"Authorization": f"Bearer {notion_key}", "Notion-Version": "2022-06-28", "Content-Type": "application/json"}, json={"properties": {"Status": {"select": {"name": "Resolved"}}, "Link": {"url": block_url}}})
                             except Exception:
                                 pass
                         resolved += 1
@@ -836,7 +836,7 @@ def create_app() -> FastAPI:
         # Mark exception row Resolved
         if exc_row_id:
             try:
-                client._sdk_call(client._sdk_client.pages.update, page_id=exc_row_id, properties={"Status": {"select": {"name": "Resolved"}}, "Link": {"url": None}})
+                import httpx as _hx2; _hx2.patch(f"https://api.notion.com/v1/pages/{exc_row_id}", headers={"Authorization": f"Bearer {notion_key}", "Notion-Version": "2022-06-28", "Content-Type": "application/json"}, json={"properties": {"Status": {"select": {"name": "Resolved"}}}})
             except Exception:
                 pass
         _invalidate_exceptions_cache()
@@ -862,7 +862,7 @@ def create_app() -> FastAPI:
         # Mark resolved
         if note_id:
             try:
-                client._sdk_call(client._sdk_client.pages.update, page_id=note_id, properties={"Status": {"select": {"name": "Resolved"}}, "Link": {"url": None}})
+                import httpx as _hx3; _hx3.patch(f"https://api.notion.com/v1/pages/{note_id}", headers={"Authorization": f"Bearer {notion_key}", "Notion-Version": "2022-06-28", "Content-Type": "application/json"}, json={"properties": {"Status": {"select": {"name": "Resolved"}}}})
             except Exception:
                 pass
         _invalidate_exceptions_cache()
@@ -1410,15 +1410,17 @@ def create_app() -> FastAPI:
 
             try:
                 client.update_block_with_page_link(block_id, search_name, target_url)
+                # Update exception row: Status=Resolved via direct API
                 if exc_row_id:
-                    try:
-                        client._sdk_call(client._sdk_client.pages.update, page_id=exc_row_id, properties={
+                    import httpx as _req3
+                    _hdrs3 = {"Authorization": f"Bearer {notion_key}", "Notion-Version": "2022-06-28", "Content-Type": "application/json"}
+                    _req3.patch(f"https://api.notion.com/v1/pages/{exc_row_id}", headers=_hdrs3, json={
+                        "properties": {
                             "Status": {"select": {"name": "Resolved"}},
                             "Link": {"url": block_url or target_url},
                             "Linkable Text": {"rich_text": [{"text": {"content": search_name}}]},
-                        })
-                    except Exception:
-                        pass
+                        }
+                    })
                 resolved += 1
                 results.append({"title": note_title, "status": "resolved", "reason": f"-> {search_name}"})
             except Exception as exc_err:
@@ -1426,6 +1428,7 @@ def create_app() -> FastAPI:
                 results.append({"title": note_title, "status": "failed", "reason": str(exc_err)[:100]})
 
         link_log.info("Link resolution complete: resolved=%d, failed=%d", resolved, failed)
+        _invalidate_exceptions_cache()
         return templates.TemplateResponse(
             request=request, name="links_result.html",
             context={"error": "", "page_name": page_name, "resolved": resolved, "failed": failed, "results": results},
