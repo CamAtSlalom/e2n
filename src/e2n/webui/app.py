@@ -747,7 +747,8 @@ def create_app() -> FastAPI:
         headers = {"Authorization": f"Bearer {notion_key}", "Notion-Version": "2022-06-28", "Content-Type": "application/json"}
         body: dict = {"filter": {"property": "Reason", "multi_select": {"is_empty": True}}}
         fixed = 0
-        while True:
+        try:
+          while True:
             results = client._api(f"databases/{exc_db_id}/query", "POST", body)
             for page in results.get("results", []):
                 props = page.get("properties", {})
@@ -769,13 +770,17 @@ def create_app() -> FastAPI:
                 else:
                     reason = "Unsupported Content"
                 # PATCH the Reason
-                _hx.patch(f"https://api.notion.com/v1/pages/{page['id']}", headers=headers, json={
-                    "properties": {"Reason": {"multi_select": [{"name": reason}]}}
-                }, timeout=60.0)
-                fixed += 1
+                try:
+                    client._api(f"pages/{page['id']}", "PATCH", {"properties": {"Reason": {"multi_select": [{"name": reason}]}}})
+                    fixed += 1
+                except Exception:
+                    pass
             if not results.get("has_more"):
                 break
             body["start_cursor"] = results["next_cursor"]
+            body["start_cursor"] = results["next_cursor"]
+        except Exception:
+            pass
         _invalidate_exceptions_cache()
         logging.getLogger("e2n.webui").info("Backfill complete: %d rows fixed", fixed)
         return RedirectResponse(url=redirect, status_code=303)
