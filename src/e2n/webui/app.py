@@ -23,10 +23,6 @@ from e2n.notion import (
 )
 from e2n.state import ProcessingStateStore
 
-try:
-    from notion_client import Client as _NotionSDKClient
-except ImportError:
-    _NotionSDKClient = None  # type: ignore[assignment, misc]
 @dataclass(frozen=True)
 class RunCard:
     """Dashboard summary for one source processing directory."""

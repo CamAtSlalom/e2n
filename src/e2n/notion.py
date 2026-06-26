@@ -385,17 +385,11 @@ class NotionDatabaseRef:
 class NotionClient:
     """Migration-focused wrapper around the Notion Python SDK."""
 
-    def __init__(self, notion_key: str, sdk_client: Any | None = None) -> None:
-        if sdk_client is None:
-            try:
-                from notion_client import Client
-            except ImportError as exc:
-                raise NotionAPIError("Install notion-client to use Notion API features") from exc
-            sdk_client = Client(auth=notion_key, notion_version="2022-06-28", max_retries=0)
-        self._sdk_client = sdk_client
+    def __init__(self, notion_key: str, **kwargs: Any) -> None:
         self._notion_key = notion_key
         self._rate_lock = __import__("threading").Lock()
         self._last_request_time = 0.0
+
 
     def search_pages(self, query: str | None = None) -> list[NotionPageRef]:
         """Return pages shared with the integration, optionally filtered by title."""
@@ -412,7 +406,7 @@ class NotionClient:
             if start_cursor:
                 body["start_cursor"] = start_cursor
 
-            response = self._sdk_call(self._sdk_client.search, **body)
+            response = self._api("search", "POST", body)
             pages.extend(_page_ref(page) for page in response.get("results", []))
             if not response.get("has_more"):
                 return pages
@@ -600,14 +594,15 @@ class NotionClient:
         upload_id = create_response["id"]
 
         file_data = local_path.read_bytes()
-        # Step 2: Send file contents via multipart form (bypass _api — needs form_data)
-        self._sdk_call(
-            self._sdk_client.request,
-            path=f"file_uploads/{upload_id}/send",
-            method="POST",
-            form_data={"file": (local_path.name, file_data, content_type)},
+        # Step 2: Send file contents via multipart form
+        import httpx as _httpx
+        resp = _httpx.post(
+            f"https://api.notion.com/v1/file_uploads/{upload_id}/send",
+            headers={"Authorization": f"Bearer {self._notion_key}", "Notion-Version": "2022-06-28"},
+            files={"file": (local_path.name, file_data, content_type)},
         )
-        return upload_id
+        if resp.status_code >= 400:
+            raise NotionAPIError(f"File upload failed: {resp.status_code} {resp.text[:200]}")
         return upload_id
 
     def append_blocks_batched(self, page_id: str, blocks: list[JsonObject]) -> None:
@@ -666,18 +661,27 @@ class NotionClient:
             self._api(f"blocks/{block_id}", "DELETE")
         except NotionAPIError:
             pass  # Block already deleted or not found — acceptable
-
     def _api(self, path: str, method: str = "GET", body: JsonObject | None = None) -> JsonObject:
-        """Direct Notion API call bypassing SDK convenience method filters."""
-        kwargs: dict[str, Any] = {"path": path, "method": method}
-        if body is not None:
-            kwargs["body"] = body
-        return self._sdk_call(self._sdk_client.request, **kwargs)
+        """Direct Notion API call using httpx."""
+        # Allow test override
+        mock_fn = getattr(self, "_mock_request", None)
+        if mock_fn:
+            kwargs = {"path": path, "method": method}
+            if body is not None:
+                kwargs["body"] = body
+            try:
+                return mock_fn(**kwargs)
+            except NotionAPIError:
+                raise
+            except Exception as exc:
+                raise NotionAPIError(f"Notion API request failed: {exc}") from exc
 
 
-    def _sdk_call(self, sdk_method: Any, **kwargs: Any) -> JsonObject:
+
+
+
         import time
-        # Rate limit: minimum 350ms between requests (< 3 req/s)
+        import httpx as _httpx
         lock = getattr(self, "_rate_lock", None)
         if lock:
             with lock:
@@ -685,17 +689,34 @@ class NotionClient:
                 if elapsed < 0.5:
                     time.sleep(0.5 - elapsed)
                 self._last_request_time = time.time()
-        # Retry on rate limit (429)
+        url = f"https://api.notion.com/v1/{path}"
+        headers = {"Authorization": f"Bearer {self._notion_key}", "Notion-Version": "2022-06-28", "Content-Type": "application/json"}
         for attempt in range(3):
             try:
-                return sdk_method(**kwargs)
+                if method == "GET":
+                    resp = _httpx.get(url, headers=headers)
+                elif method == "POST":
+                    resp = _httpx.post(url, headers=headers, json=body)
+                elif method == "PATCH":
+                    resp = _httpx.patch(url, headers=headers, json=body)
+                elif method == "DELETE":
+                    resp = _httpx.delete(url, headers=headers)
+                else:
+                    raise NotionAPIError(f"Unsupported method: {method}")
+                if resp.status_code == 429:
+                    time.sleep(5.0 * (attempt + 1))
+                    continue
+                if resp.status_code >= 400:
+                    raise NotionAPIError(f"Notion API error {resp.status_code}: {resp.text[:300]}")
+                return resp.json()
+            except NotionAPIError:
+                raise
             except Exception as exc:
                 if "rate" in str(exc).lower() or "429" in str(exc):
-                    time.sleep(5.0 * (attempt + 1))  # 5s, 10s, 15s backoff
+                    time.sleep(5.0 * (attempt + 1))
                     continue
-                raise NotionAPIError(f"Notion SDK request failed: {exc}") from exc
+                raise NotionAPIError(f"Notion API request failed: {exc}") from exc
         raise NotionAPIError("Notion API rate limited after 3 retries")
-
 
 def multi_select_property(values: tuple[str, ...] | list[str]) -> JsonObject:
     """Build a Notion multi-select property value from unique non-empty values."""
