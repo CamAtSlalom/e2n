@@ -1443,8 +1443,14 @@ def create_app() -> FastAPI:
                     exc_db = ensure_exception_database(client, br.exceptions.page_id)
                     exc_db_id = exc_db.database_id
                     _cache["exc_db_id"] = exc_db_id
-                # Paginate to fetch ALL rows (including resolved)
-                body: dict = {}
+                # Query with filter: Reason contains "Encrypted" AND Status != "Resolved"
+                query_filter = {
+                    "and": [
+                        {"property": "Reason", "multi_select": {"contains": "Encrypted"}},
+                        {"property": "Status", "select": {"does_not_equal": "Resolved"}},
+                    ]
+                }
+                body: dict = {"filter": query_filter}
                 while True:
                     results = client._api(f"databases/{exc_db_id}/query", "POST", body)
                     for page in results.get("results", []):
@@ -1463,12 +1469,12 @@ def create_app() -> FastAPI:
                         })
                     if not results.get("has_more"):
                         break
-                    body = {"start_cursor": results["next_cursor"]}
+                    body = {"filter": query_filter, "start_cursor": results["next_cursor"]}
             except Exception as exc:
                 logging.getLogger("e2n.webui").warning("Password page: failed to load exceptions from Notion: %s", exc)
         if not all_exceptions:
             all_exceptions = _load_exceptions_from_processing()
-        encrypted = [e for e in all_exceptions if e.get("status", "Open") != "Resolved" and ("Encrypted" in e.get("reasons", "") or "encrypted" in e.get("error_message", "").lower() or "passphrase" in e.get("error_message", "").lower())]
+        encrypted = all_exceptions  # Already filtered server-side: Reason=Encrypted, Status!=Resolved
         return templates.TemplateResponse(
             request=request,
             name="passwords.html",
@@ -1629,15 +1635,14 @@ def create_app() -> FastAPI:
             resolved_url = f"https://www.notion.so/{page_id_clean}#{new_block_id}" if new_block_id else f"https://www.notion.so/{page_id_clean}"
         except Exception:
             resolved_url = ""
-
         # Update exception: Status=Resolved, new Link, clear Encrypted Content
-        try:
-            update_body: dict = {"properties": {"Status": {"select": {"name": "Resolved"}}, "Encrypted Content": {"rich_text": []}}}
-            if resolved_url:
-                update_body["properties"]["Link"] = {"url": resolved_url}
-            client._api(f"pages/{note_id}", "PATCH", update_body)
-        except Exception:
-            pass
+        import httpx as _req
+        _headers = {"Authorization": f"Bearer {notion_key}", "Notion-Version": "2022-06-28", "Content-Type": "application/json"}
+        _update_body = {"properties": {"Status": {"select": {"name": "Resolved"}}, "Encrypted Content": {"rich_text": []}}}
+        if resolved_url:
+            _update_body["properties"]["Link"] = {"url": resolved_url}
+        _resp = _req.patch(f"https://api.notion.com/v1/pages/{note_id}", headers=_headers, json=_update_body)
+        logging.getLogger("e2n.webui").info("Permanently decrypt update: %s %s", _resp.status_code, _resp.text[:200] if _resp.status_code != 200 else "OK")
         _invalidate_exceptions_cache()
         return RedirectResponse(url="/passwords/", status_code=303)
 
@@ -1670,15 +1675,11 @@ def create_app() -> FastAPI:
             except Exception:
                 pass
         # Update exception: Status=Resolved, clear Encrypted Content, clear Link
-        try:
-            update_props: dict = {
-                "Status": {"select": {"name": "Resolved"}},
-                "Encrypted Content": {"rich_text": []},
-                "Link": {"url": None},
-            }
-            client._api(f"pages/{note_id}", "PATCH", {"properties": update_props})
-        except Exception:
-            pass
+        import httpx as _req2
+        _hdrs = {"Authorization": f"Bearer {notion_key}", "Notion-Version": "2022-06-28", "Content-Type": "application/json"}
+        _del_body = {"properties": {"Status": {"select": {"name": "Resolved"}}, "Encrypted Content": {"rich_text": []}}}
+        _resp2 = _req2.patch(f"https://api.notion.com/v1/pages/{note_id}", headers=_hdrs, json=_del_body)
+        logging.getLogger("e2n.webui").info("Delete encrypted update: %s %s", _resp2.status_code, _resp2.text[:200] if _resp2.status_code != 200 else "OK")
         _invalidate_exceptions_cache()
         return RedirectResponse(url="/passwords/", status_code=303)
     @app.post("/resolve/delete-empty-pages")
