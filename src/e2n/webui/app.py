@@ -585,12 +585,15 @@ def create_app() -> FastAPI:
     # Link target resolution state: {name: "pending"|"exists"|"missing"}
     _link_targets_status: dict[str, str] = {}
     _link_targets_checking = [False]
+    # Cached page_id/URL for link targets: {name: {"page_id": ..., "url": ...}}
+    _link_target_pages: dict[str, dict] = {}
 
     def _invalidate_exceptions_cache():
         _cache["notion_exceptions"] = None
         _cache["exc_db_id"] = None
         _cache["import_db_ids"] = None
         _link_targets_status.clear()
+        _link_target_pages.clear()
 
     def _get_import_db_ids(client: NotionClient, notion_key: str) -> set[str]:
         """Get the set of import database IDs (under 'Evernote Import' page)."""
@@ -1202,8 +1205,9 @@ def create_app() -> FastAPI:
         try:
             client = NotionClient(notion_key)
             import_dbs = _get_import_db_ids(client, notion_key)
-            # Bulk-load all page titles from import databases (one query per DB, not per target)
-            import_titles: set[str] = set()
+            import_dbs = _get_import_db_ids(client, notion_key)
+            # Bulk-load all page titles + IDs from import databases
+            import_titles: dict[str, dict] = {}  # {title: {page_id, url}}
             for db_id in import_dbs:
                 body: dict = {}
                 while True:
@@ -1212,19 +1216,20 @@ def create_app() -> FastAPI:
                         props = page.get("properties", {})
                         title_items = props.get("Name", {}).get("title", []) or props.get("title", {}).get("title", [])
                         title = "".join(t.get("text", {}).get("content", "") for t in title_items)
-                        if title:
-                            import_titles.add(title)
+                        if title and title not in import_titles:
+                            pid = page["id"]
+                            url = page.get("url", "") or f"https://www.notion.so/{pid.replace('-', '')}"
+                            import_titles[title] = {"page_id": pid, "url": url}
                     if not results.get("has_more"):
                         break
                     body = {"start_cursor": results["next_cursor"]}
-            # Match names against bulk-loaded titles
+            # Match names and cache page references
             for name in names:
                 if name in import_titles:
                     _link_targets_status[name] = "exists"
+                    _link_target_pages[name] = import_titles[name]
                 else:
                     _link_targets_status[name] = "missing"
-        except Exception:
-            # On failure, mark all as missing so UI doesn't hang
             for name in names:
                 if _link_targets_status.get(name) == "pending":
                     _link_targets_status[name] = "missing"
@@ -1241,9 +1246,12 @@ def create_app() -> FastAPI:
         }
 
     @app.post("/links/resolve-all", response_class=HTMLResponse)
+
+    @app.post("/links/resolve-all", response_class=HTMLResponse)
     def links_resolve_all(request: Request):
         """Auto-resolve all link targets from most-referenced to least."""
         import logging
+        from concurrent.futures import ThreadPoolExecutor
         link_log = logging.getLogger("e2n.webui.links")
 
         notion_key = _wizard_state.get("notion_key", "")
@@ -1269,55 +1277,56 @@ def create_app() -> FastAPI:
         total_failed = 0
         results: list[dict] = []
 
-        # Get exceptions page_id AND database_id to exclude from searches
-        notion_root = _wizard_state.get("notion_root", "") or os.environ.get("NOTION_ROOT", "")
-        exc_page_id = ""
-        exc_db_id_excl = ""
-        try:
-            br = bootstrap_notion_pages(notion_key, root_title=notion_root if notion_root else None)
-            exc_page_id = br.exceptions.page_id
-            exc_db_obj = ensure_exception_database(client, exc_page_id)
-            exc_db_id_excl = exc_db_obj.database_id
-        except Exception:
-            pass
+        def _resolve_one(exc: dict, target_url: str, page_name: str) -> dict:
+            """Resolve a single exception link."""
+            block_url = exc.get("block_url", "")
+            exc_row_id = exc.get("note_id", "")
+            block_id = ""
+            if "#" in block_url:
+                block_id_raw = block_url.split("#")[-1]
+                block_id = f"{block_id_raw[:8]}-{block_id_raw[8:12]}-{block_id_raw[12:16]}-{block_id_raw[16:20]}-{block_id_raw[20:]}" if len(block_id_raw) == 32 else block_id_raw
+            if not block_id:
+                return {"status": "failed"}
+            try:
+                client.update_block_with_page_link(block_id, page_name, target_url)
+                if exc_row_id:
+                    import httpx as _hx
+                    _hx.patch(f"https://api.notion.com/v1/pages/{exc_row_id}", headers={"Authorization": f"Bearer {notion_key}", "Notion-Version": "2022-06-28", "Content-Type": "application/json"}, json={
+                        "properties": {"Status": {"select": {"name": "Resolved"}}, "Link": {"url": block_url or target_url}, "Linkable Text": {"rich_text": [{"text": {"content": page_name}}]}}
+                    })
+                return {"status": "resolved"}
+            except Exception:
+                return {"status": "failed"}
 
         for page_name, refs in sorted_targets:
-            # Find target page in import databases (exclude exceptions)
-            all_matches = [p for p in client.search_pages(page_name) if p.title == page_name]
-            import_dbs = _get_import_db_ids(client, notion_key)
-            target_matches = [p for p in all_matches if getattr(p, "parent_database_id", "") in import_dbs] if import_dbs else all_matches
-            if not target_matches:
-                total_failed += len(refs)
-                results.append({"title": page_name, "status": "skipped", "reason": f"page not found in imports ({len(refs)} refs)"})
-                continue
+            # Use cached page data if available, else search
+            cached = _link_target_pages.get(page_name)
+            if cached:
+                target_url = cached["url"]
+            else:
+                all_matches = [p for p in client.search_pages(page_name) if p.title == page_name]
+                import_dbs = _get_import_db_ids(client, notion_key)
+                target_matches = [p for p in all_matches if getattr(p, "parent_database_id", "") in import_dbs] if import_dbs else all_matches
+                if not target_matches:
+                    total_failed += len(refs)
+                    results.append({"title": page_name, "status": "skipped", "reason": f"page not found ({len(refs)} refs)"})
+                    continue
+                target_url = target_matches[0].url or f"https://www.notion.so/{target_matches[0].page_id.replace('-', '')}"
 
-            target_page = target_matches[0]
-            target_url = target_page.url or f"https://www.notion.so/{target_page.page_id.replace('-', '')}"
+            # Parallelize resolution within this target
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                futures = [pool.submit(_resolve_one, exc, target_url, page_name) for exc in refs]
+                ref_results = [f.result() for f in futures]
 
-            resolved_this = 0
-            for exc in refs:
-                note_title = exc["title"]
-                try:
-                    note_pages = [p for p in client.search_pages(note_title) if p.title == note_title]
-                    if not note_pages:
-                        total_failed += 1
-                        continue
-                    children = client.list_block_children(note_pages[0].page_id)
-                    for block in children:
-                        if block.get("type") in ("callout", "paragraph", "quote", "heading_1", "heading_2", "heading_3"):
-                            block_text = "".join(rt.get("text", {}).get("content", "") for rt in block.get(block.get("type", ""), {}).get("rich_text", []))
-                            if page_name.lower() in block_text.lower():
-                                client.update_block_with_page_link(block["id"], page_name, target_url)
-                                resolved_this += 1
-                                total_resolved += 1
-                                break
-                except Exception:
-                    total_failed += 1
-
-            results.append({"title": page_name, "status": "resolved" if resolved_this > 0 else "partial", "reason": f"resolved {resolved_this}/{len(refs)}"})
+            resolved_this = sum(1 for r in ref_results if r["status"] == "resolved")
+            failed_this = sum(1 for r in ref_results if r["status"] == "failed")
+            total_resolved += resolved_this
+            total_failed += failed_this
+            results.append({"title": page_name, "status": "resolved" if resolved_this > 0 else "skipped", "reason": f"resolved {resolved_this}/{len(refs)}"})
             link_log.info("  %s: resolved %d/%d", page_name, resolved_this, len(refs))
 
         link_log.info("Resolve-all complete: resolved=%d, failed=%d", total_resolved, total_failed)
+        _invalidate_exceptions_cache()
         return templates.TemplateResponse(
             request=request, name="links_result.html",
             context={"error": "", "page_name": "ALL LINKS", "resolved": total_resolved, "failed": total_failed, "results": results},
@@ -1338,30 +1347,26 @@ def create_app() -> FastAPI:
 
         client = NotionClient(notion_key)
 
-        # Step 1: Find the target page in IMPORT databases (exclude Import-Exceptions)
+
+        # Step 1: Find target page — use cached page_id if available, else search
         search_name = override_target.strip() if override_target.strip() else page_name
-        all_matches = [p for p in client.search_pages(search_name) if p.title == search_name]
-        # Exclude pages under Import-Exceptions (those are exception rows, not imported pages)
-        notion_root = _wizard_state.get("notion_root", "") or os.environ.get("NOTION_ROOT", "")
-        exc_page_id = ""
-        exc_db_id_excl = ""
-        try:
-            bootstrap_result = bootstrap_notion_pages(notion_key, root_title=notion_root if notion_root else None)
-            exc_page_id = bootstrap_result.exceptions.page_id
-            exc_db_obj = ensure_exception_database(client, exc_page_id)
-            exc_db_id_excl = exc_db_obj.database_id
-        except Exception:
-            pass
-        import_dbs = _get_import_db_ids(client, notion_key)
-        target_matches = [p for p in all_matches if getattr(p, "parent_database_id", "") in import_dbs] if import_dbs else all_matches
-        if not target_matches:
-            return templates.TemplateResponse(
-                request=request, name="links_result.html",
-                context={"error": f"Page '{search_name}' not found in import databases (only found in exceptions).", "page_name": page_name, "resolved": 0, "failed": 0, "results": []},
-            )
-        target_page = target_matches[0]
-        target_url = target_page.url or f"https://www.notion.so/{target_page.page_id.replace('-', '')}"
-        link_log.info("Target page found: %s (%s)", page_name, target_page.page_id)
+        cached = _link_target_pages.get(search_name)
+        if cached:
+            target_url = cached["url"]
+            link_log.info("Target page found (cached): %s (%s)", search_name, cached["page_id"])
+        else:
+            all_matches = [p for p in client.search_pages(search_name) if p.title == search_name]
+            import_dbs = _get_import_db_ids(client, notion_key)
+            target_matches = [p for p in all_matches if getattr(p, "parent_database_id", "") in import_dbs] if import_dbs else all_matches
+            if not target_matches:
+                return templates.TemplateResponse(
+                    request=request, name="links_result.html",
+                    context={"error": f"Page '{search_name}' not found in import databases.", "page_name": page_name, "resolved": 0, "failed": 0, "results": []},
+                )
+            target_page = target_matches[0]
+            target_url = target_page.url or f"https://www.notion.so/{target_page.page_id.replace('-', '')}"
+            link_log.info("Target page found (searched): %s (%s)", search_name, target_page.page_id)
+
 
         # Step 2: Find all exception records referencing this page name
         exceptions = _load_exceptions_from_notion() or _load_exceptions_from_processing()
@@ -1373,7 +1378,8 @@ def create_app() -> FastAPI:
         failed = 0
         results: list[dict] = []
 
-        for exc in referencing:
+        def _resolve_one_link(exc: dict) -> dict:
+            """Resolve a single link exception. Returns result dict."""
             note_title = exc["title"]
             block_url = exc.get("block_url", "")
             exc_row_id = exc.get("note_id", "")
@@ -1387,30 +1393,11 @@ def create_app() -> FastAPI:
                 else:
                     block_id = block_id_raw
 
-            # Fallback: scan page blocks
             if not block_id:
-                try:
-                    note_pages = [p for p in client.search_pages(note_title) if p.title == note_title]
-                    if note_pages:
-                        children = client.list_block_children(note_pages[0].page_id)
-                        for block in children:
-                            btype = block.get("type", "")
-                            if btype in ("callout", "paragraph"):
-                                bt = "".join(rt.get("text", {}).get("content", "") for rt in block.get(btype, {}).get("rich_text", []))
-                                if page_name.lower() in bt.lower():
-                                    block_id = block["id"]
-                                    break
-                except Exception:
-                    pass
-
-            if not block_id:
-                failed += 1
-                results.append({"title": note_title, "status": "failed", "reason": "no block reference"})
-                continue
+                return {"title": note_title, "status": "failed", "reason": "no block reference"}
 
             try:
                 client.update_block_with_page_link(block_id, search_name, target_url)
-                # Update exception row: Status=Resolved via direct API
                 if exc_row_id:
                     import httpx as _req3
                     _hdrs3 = {"Authorization": f"Bearer {notion_key}", "Notion-Version": "2022-06-28", "Content-Type": "application/json"}
@@ -1421,11 +1408,17 @@ def create_app() -> FastAPI:
                             "Linkable Text": {"rich_text": [{"text": {"content": search_name}}]},
                         }
                     })
-                resolved += 1
-                results.append({"title": note_title, "status": "resolved", "reason": f"-> {search_name}"})
+                return {"title": note_title, "status": "resolved", "reason": f"-> {search_name}"}
             except Exception as exc_err:
-                failed += 1
-                results.append({"title": note_title, "status": "failed", "reason": str(exc_err)[:100]})
+                return {"title": note_title, "status": "failed", "reason": str(exc_err)[:100]}
+
+        # Parallelize resolution across exceptions (each targets a different page/block)
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            results = list(pool.map(_resolve_one_link, referencing))
+
+        resolved = sum(1 for r in results if r["status"] == "resolved")
+        failed = sum(1 for r in results if r["status"] == "failed")
 
         link_log.info("Link resolution complete: resolved=%d, failed=%d", resolved, failed)
         _invalidate_exceptions_cache()
