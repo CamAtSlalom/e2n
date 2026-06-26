@@ -1191,8 +1191,9 @@ def create_app() -> FastAPI:
             },
         )
 
+
     def _check_link_targets_background(names: list[str]):
-        """Background thread: check each link target against import databases."""
+        """Background thread: bulk-load import DB titles, then match locally."""
         _link_targets_checking[0] = True
         notion_key = _wizard_state.get("notion_key", "") or os.environ.get("NOTION_KEY", "") or os.environ.get("NOTION_TOKEN", "")
         if not notion_key:
@@ -1201,19 +1202,35 @@ def create_app() -> FastAPI:
         try:
             client = NotionClient(notion_key)
             import_dbs = _get_import_db_ids(client, notion_key)
+            # Bulk-load all page titles from import databases (one query per DB, not per target)
+            import_titles: set[str] = set()
+            for db_id in import_dbs:
+                body: dict = {}
+                while True:
+                    results = client._api(f"databases/{db_id}/query", "POST", body)
+                    for page in results.get("results", []):
+                        props = page.get("properties", {})
+                        title_items = props.get("Name", {}).get("title", []) or props.get("title", {}).get("title", [])
+                        title = "".join(t.get("text", {}).get("content", "") for t in title_items)
+                        if title:
+                            import_titles.add(title)
+                    if not results.get("has_more"):
+                        break
+                    body = {"start_cursor": results["next_cursor"]}
+            # Match names against bulk-loaded titles
             for name in names:
-                try:
-                    found = client.search_pages(name)
-                    if any(getattr(p, "parent_database_id", "") in import_dbs for p in found):
-                        _link_targets_status[name] = "exists"
-                    else:
-                        _link_targets_status[name] = "missing"
-                except Exception:
+                if name in import_titles:
+                    _link_targets_status[name] = "exists"
+                else:
                     _link_targets_status[name] = "missing"
         except Exception:
-            pass
+            # On failure, mark all as missing so UI doesn't hang
+            for name in names:
+                if _link_targets_status.get(name) == "pending":
+                    _link_targets_status[name] = "missing"
         finally:
             _link_targets_checking[0] = False
+
 
     @app.get("/links/status")
     def links_status():
@@ -1474,7 +1491,7 @@ def create_app() -> FastAPI:
                 logging.getLogger("e2n.webui").warning("Password page: failed to load exceptions from Notion: %s", exc)
         if not all_exceptions:
             all_exceptions = _load_exceptions_from_processing()
-        encrypted = all_exceptions  # Already filtered server-side: Reason=Encrypted, Status!=Resolved
+        encrypted = [e for e in all_exceptions if "Encrypted" in e.get("reasons", "") and e.get("status", "Open") != "Resolved"]
         return templates.TemplateResponse(
             request=request,
             name="passwords.html",
@@ -1625,6 +1642,13 @@ def create_app() -> FastAPI:
             return RedirectResponse(url="/passwords/", status_code=303)
         # Replace marker block with decrypted plain text
         try:
+            # Check if block still exists (idempotency guard against double-submit)
+            try:
+                blk = client._api(f"blocks/{block_id}", "GET")
+                if blk.get("archived", False):
+                    return RedirectResponse(url="/passwords/", status_code=303)
+            except Exception:
+                return RedirectResponse(url="/passwords/", status_code=303)
             from e2n.notion import paragraph_block, plain_text_span
             client.delete_block(block_id)
             block = paragraph_block([plain_text_span(decrypted_text[:2000])])
