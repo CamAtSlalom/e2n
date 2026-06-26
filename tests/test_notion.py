@@ -137,6 +137,11 @@ class FakeSDKClient:
             "has_more": False,
         }
 
+    def request(self, path="", method="GET", body=None, **kwargs):
+        if method == "POST" and "pages" in path:
+            return self.pages.create(**(body or {}))
+        return {}
+
 
 def test_notion_client_uses_sdk_for_search_and_page_creation() -> None:
     sdk_client = FakeSDKClient()
