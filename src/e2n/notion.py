@@ -433,7 +433,7 @@ class NotionClient:
             if start_cursor:
                 body["start_cursor"] = start_cursor
 
-            response = self._sdk_call(self._sdk_client.search, **body)
+            response = self._api("search", "POST", body)
             databases.extend(_database_ref(database) for database in response.get("results", []))
             if not response.get("has_more"):
                 return databases
@@ -496,14 +496,15 @@ class NotionClient:
         children: list[JsonObject] = []
         start_cursor: str | None = None
         while True:
-            body: JsonObject = {"block_id": block_id, "page_size": 100}
+            path = f"blocks/{block_id}/children?page_size=100"
             if start_cursor:
-                body["start_cursor"] = start_cursor
-            response = self._sdk_call(self._sdk_client.blocks.children.list, **body)
+                path += f"&start_cursor={start_cursor}"
+            response = self._api(path, "GET")
             children.extend(response.get("results", []))
             if not response.get("has_more"):
                 return children
             start_cursor = response.get("next_cursor")
+
 
     def archive_page(self, page_id: str) -> NotionPageRef:
         """Archive one Notion page by id for cleanup workflows."""

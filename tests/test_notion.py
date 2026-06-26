@@ -1078,6 +1078,8 @@ def test_import_note_captures_marker_block_ids() -> None:
             if body and "children" in body:
                 return {"id": "note-page-id", "url": "https://notion.so/note"}
             return {"id": "exc-row-1", "url": "https://notion.so/exc"}
+        if "blocks" in path and "children" in path and method == "GET":
+            return {"results": [{"id": "block-para-1", "type": "paragraph"}, {"id": "block-callout-1", "type": "callout"}], "has_more": False}
         return {}
     mock_api.request.side_effect = _fake_request
     # blocks.children.list returns the appended blocks with their IDs
@@ -1191,6 +1193,8 @@ def test_execute_import_note_creates_exception_rows_for_evernote_links(tmp_path)
             if body and "children" in body:
                 return {"id": "note-page-id", "url": "https://notion.so/note"}
             return {"id": "exc-row-id", "url": "https://notion.so/exc"}
+        if "blocks" in path and "children" in path and method == "GET":
+            return {"results": [{"id": "block-para-1", "type": "paragraph"}, {"id": "blk-callout-1", "type": "callout"}], "has_more": False}
         return {}
     mock_api.request.side_effect = _fake_req
 
