@@ -481,7 +481,7 @@ class NotionClient:
             "parent": {"database_id": database_id},
             "properties": properties,
         }
-        return _page_ref(self._sdk_call(self._sdk_client.pages.create, **body))
+        return _page_ref(self._api("pages", "POST", body))
 
     def update_page_properties(self, page_id: str, properties: JsonObject) -> NotionPageRef:
         """Update page/database-row properties."""
