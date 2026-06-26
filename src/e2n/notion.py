@@ -485,7 +485,7 @@ class NotionClient:
 
     def update_page_properties(self, page_id: str, properties: JsonObject) -> NotionPageRef:
         """Update page/database-row properties."""
-        return _page_ref(self._sdk_call(self._sdk_client.pages.update, page_id=page_id, properties=properties))
+        return _page_ref(self._api(f"pages/{page_id}", "PATCH", {"properties": properties}))
 
     def retrieve_page_raw(self, page_id: str) -> JsonObject:
         """Retrieve raw page payload including properties."""
