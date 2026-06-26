@@ -1163,7 +1163,13 @@ def create_app() -> FastAPI:
     @app.get("/links/", response_class=HTMLResponse)
     def links_home(request: Request):
         """Show unique link targets — renders immediately, target existence checked in background."""
-        exceptions = _load_exceptions_from_notion() or _load_exceptions_from_processing()
+        exceptions = _cache.get("notion_exceptions") or _load_exceptions_from_processing()
+        # If Notion cache is empty, kick off background fetch
+        if _cache.get("notion_exceptions") is None:
+            import threading
+            def _bg_load_exceptions():
+                _load_exceptions_from_notion()
+            threading.Thread(target=_bg_load_exceptions, daemon=True).start()
         link_exceptions = [e for e in exceptions if "Evernote Link" in e["reasons"]]
         # Group by link_text (the target page name), track source pages
         targets: dict[str, dict] = {}
