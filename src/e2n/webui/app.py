@@ -1534,20 +1534,36 @@ def create_app() -> FastAPI:
             except Exception as e:
                 return {"title": exc["title"], "status": "failed", "reason": str(e)[:80]}
 
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            results = list(pool.map(_resolve_one, referencing))
 
-        resolved = sum(1 for r in results if r["status"] == "resolved")
-        failed = sum(1 for r in results if r["status"] == "failed")
-        link_log.info("Link resolution: %d resolved, %d failed for '%s'", resolved, failed, page_name)
+        if len(referencing) < 5:
+            # Small batch: resolve synchronously, show summary
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                results = list(pool.map(_resolve_one, referencing))
+            resolved = sum(1 for r in results if r["status"] == "resolved")
+            failed = sum(1 for r in results if r["status"] == "failed")
+            link_log.info("Link resolution: %d resolved, %d failed for '%s'", resolved, failed, page_name)
+            _invalidate_exceptions_cache()
+            import threading
+            threading.Thread(target=_load_exceptions_from_notion, daemon=True).start()
+            return templates.TemplateResponse(request=request, name="links_result.html",
+                context={"error": "", "page_name": page_name, "resolved": resolved, "failed": failed, "results": results})
+        else:
+            # Large batch: resolve in background, redirect with progress
+            import threading
+            _resolve_progress.update({"active": True, "resolved": 0, "failed": 0, "total": len(referencing), "message": f"Resolving {search_name} ({len(referencing)} links)..."})
+            def _bg_resolve():
+                with ThreadPoolExecutor(max_workers=2) as pool:
+                    for result in pool.map(_resolve_one, referencing):
+                        if result["status"] == "resolved":
+                            _resolve_progress["resolved"] += 1
+                        else:
+                            _resolve_progress["failed"] += 1
+                _resolve_progress.update({"active": False, "message": f"Done: {_resolve_progress['resolved']} resolved, {_resolve_progress['failed']} failed"})
+                _invalidate_exceptions_cache()
+                link_log.info("Link resolution complete: %s", _resolve_progress["message"])
+            threading.Thread(target=_bg_resolve, daemon=True).start()
+            return RedirectResponse(url="/links/", status_code=303)
 
-        # Background cache refresh so /links/ is ready when they navigate back
-        import threading
-        _invalidate_exceptions_cache()
-        threading.Thread(target=_load_exceptions_from_notion, daemon=True).start()
-
-        return templates.TemplateResponse(request=request, name="links_result.html",
-            context={"error": "", "page_name": page_name, "resolved": resolved, "failed": failed, "results": results})
 
 
     # --- Trivial resolution routes ---
