@@ -140,7 +140,15 @@ class FakeSDKClient:
     def request(self, path="", method="GET", body=None, **kwargs):
         if method == "POST" and "pages" in path:
             return self.pages.create(**(body or {}))
+        if method == "PATCH" and path.startswith("pages/"):
+            pid = path.split("/")[1]
+            self.pages.updated.append({"page_id": pid, **(body or {})})
+            return {"id": pid, "url": f"https://notion.so/{pid}", "parent": {"type": "workspace", "workspace": True}, "properties": {"title": {"type": "title", "title": [{"plain_text": "Archived"}]}}}
         return {}
+
+
+
+
 
 
 def test_notion_client_uses_sdk_for_search_and_page_creation() -> None:

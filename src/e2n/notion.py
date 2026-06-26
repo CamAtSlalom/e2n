@@ -507,7 +507,7 @@ class NotionClient:
 
     def archive_page(self, page_id: str) -> NotionPageRef:
         """Archive one Notion page by id for cleanup workflows."""
-        return _page_ref(self._sdk_call(self._sdk_client.pages.update, page_id=page_id, archived=True))
+        return _page_ref(self._api(f"pages/{page_id}", "PATCH", {"archived": True}))
 
 
     def update_block_with_page_link(self, block_id: str, link_text: str, page_url: str) -> JsonObject:
