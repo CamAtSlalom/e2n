@@ -643,12 +643,12 @@ class NotionClient:
         }
 
         try:
-            page = self._sdk_call(self._sdk_client.pages.create, **body)
+            page = self._api("pages", "POST", body)
         except NotionAPIError as exc:
             if "not a property that exists" in str(exc) and IMPORT_TAGS_PROPERTY in str(exc):
                 # Tags property doesn't exist on this database — retry without it
                 properties.pop(IMPORT_TAGS_PROPERTY, None)
-                page = self._sdk_call(self._sdk_client.pages.create, **body)
+                page = self._api("pages", "POST", body)
             else:
                 raise
 
@@ -906,7 +906,7 @@ def create_exception_row(
     }
 
     try:
-        response = client._sdk_call(client._sdk_client.pages.create, **body)
+        response = client._api("pages", "POST", body)
         return response["id"]
     except NotionAPIError as exc:
         if "not a property that exists" in str(exc):
@@ -916,7 +916,7 @@ def create_exception_row(
                 "properties": {"title": {"title": [{"text": {"content": note_name}}]}},
             }
             try:
-                response = client._sdk_call(client._sdk_client.pages.create, **fallback_body)
+                response = client._api("pages", "POST", fallback_body)
                 return response["id"]
             except Exception:
                 pass

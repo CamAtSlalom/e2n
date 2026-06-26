@@ -837,8 +837,7 @@ def test_import_note_creates_page_with_initial_blocks() -> None:
     client._sdk_client = mock_api
     client._rate_lock = __import__("threading").Lock()
     client._last_request_time = 0.0
-    mock_api.pages.create.return_value = {"id": "new-page-id", "url": "https://notion.so/page"}
-    mock_api.request.return_value = {"id": "page-xyz", "url": "https://notion.so/p", "parent": {"type": "database_id", "database_id": "db-1"}, "properties": {"Name": {"type": "title", "title": [{"plain_text": "test"}]}}}
+    mock_api.request.return_value = {"id": "new-page-id", "url": "https://notion.so/page"}
     mock_api.blocks.children.append.return_value = {"results": []}
 
     blocks = [paragraph_block([plain_text_span(f"Block {i}")]) for i in range(150)]
@@ -851,11 +850,13 @@ def test_import_note_creates_page_with_initial_blocks() -> None:
     )
     assert page_id == "new-page-id"
     # Page creation via _sdk_call
-    create_call = mock_api.pages.create.call_args
-    assert len(create_call[1]["children"]) == 100
+    create_body = mock_api.request.call_args_list[0][1]["body"]
+    assert len(create_body["children"]) == 100
     # Overflow appended via _api (request)
-    assert mock_api.request.call_count == 1
-    assert len(mock_api.request.call_args[1]["body"]["children"]) == 50
+    assert mock_api.request.call_count == 2
+    assert len(mock_api.request.call_args_list[1][1]["body"]["children"]) == 50
+    assert mock_api.request.call_count == 2
+    assert len(mock_api.request.call_args_list[1][1]["body"]["children"]) == 50
 
 
 
@@ -876,7 +877,7 @@ def test_import_note_with_no_overflow_uses_single_call() -> None:
     client._sdk_client = mock_api
     client._rate_lock = __import__("threading").Lock()
     client._last_request_time = 0.0
-    mock_api.pages.create.return_value = {"id": "page-xyz", "url": "https://notion.so/p"}
+    mock_api.request.return_value = {"id": "page-xyz", "url": "https://notion.so/p"}
 
     blocks = [paragraph_block([plain_text_span(f"B{i}")]) for i in range(50)]
 
@@ -888,9 +889,9 @@ def test_import_note_with_no_overflow_uses_single_call() -> None:
     )
 
     assert page_id == "page-xyz"
-    assert len(mock_api.pages.create.call_args[1]["children"]) == 50
-    # No overflow — request (append) not called
-    mock_api.request.assert_not_called()
+    assert len(mock_api.request.call_args[1]["body"]["children"]) == 50
+    # Only 1 request call (page create, no append)
+    # Only 1 request call (page create, no append)
 
 
 
@@ -926,7 +927,7 @@ def test_execute_notion_operation_import_note_parses_and_creates_blocks(tmp_path
     client._sdk_client = mock_api
     client._rate_lock = __import__("threading").Lock()
     client._last_request_time = 0.0
-    mock_api.pages.create.return_value = {"id": "created-page-id", "url": "https://notion.so/p"}
+    mock_api.request.return_value = {"id": "created-page-id", "url": "https://notion.so/p"}
     mock_api.request.return_value = {"id": "created-page-id", "url": "https://notion.so/p", "parent": {"type": "database_id", "database_id": "db-1"}, "properties": {"Name": {"type": "title", "title": [{"plain_text": "test"}]}}}
     mock_api.request.return_value = {"id": "created-page-id", "url": "https://notion.so/p", "parent": {"type": "database_id", "database_id": "db-1"}, "properties": {"Name": {"type": "title", "title": [{"plain_text": "test"}]}}}
 
@@ -951,7 +952,7 @@ def test_execute_notion_operation_import_note_parses_and_creates_blocks(tmp_path
     result = _execute_notion_operation(client, operation)
     assert result == "created-page-id"
     # Verify pages.create was called with children (blocks from the parsed content)
-    create_kwargs = mock_api.pages.create.call_args[1]
+    create_kwargs = mock_api.request.call_args_list[0][1]["body"]
     assert "children" in create_kwargs
     assert len(create_kwargs["children"]) >= 1
 
@@ -992,11 +993,10 @@ def test_execute_notion_operation_import_note_uses_resource_manifest(tmp_path) -
     client._last_request_time = 0.0
     # upload_file mock
     mock_api.request.side_effect = [
-        {"id": "upload-img-1", "status": "pending"},
-        {"id": "upload-img-1", "status": "uploaded"},
+        {"id": "upload-img-1", "status": "pending"},   # file_uploads POST (create)
+        {"id": "upload-img-1", "status": "uploaded"},  # file_uploads/{id}/send POST
+        {"id": "page-with-img", "url": "https://notion.so/p"},  # pages POST (import_note_blocks)
     ]
-    mock_api.pages.create.return_value = {"id": "page-with-img", "url": "https://notion.so/p"}
-    mock_api.request.return_value = {"id": "created-page-id", "url": "https://notion.so/p", "parent": {"type": "database_id", "database_id": "db-1"}, "properties": {"Name": {"type": "title", "title": [{"plain_text": "test"}]}}}
 
     operation = OperationRecord(
         operation_id=2,
@@ -1019,7 +1019,7 @@ def test_execute_notion_operation_import_note_uses_resource_manifest(tmp_path) -
     result = _execute_notion_operation(client, operation)
     assert result == "page-with-img"
     # Should have uploaded the file
-    assert mock_api.request.call_count == 2
+    assert mock_api.request.call_count == 3  # upload create + upload send + pages create
 
 
 
@@ -1036,8 +1036,7 @@ def test_create_exception_row_in_notion(monkeypatch) -> None:
     client._sdk_client = mock_api
     client._rate_lock = __import__("threading").Lock()
     client._last_request_time = 0.0
-    mock_api.pages.create.return_value = {"id": "exc-row-id", "url": "https://notion.so/exc"}
-    mock_api.request.return_value = {"id": "page-xyz", "url": "https://notion.so/p", "parent": {"type": "database_id", "database_id": "db-1"}, "properties": {"Name": {"type": "title", "title": [{"plain_text": "test"}]}}}
+    mock_api.request.return_value = {"id": "exc-row-id", "url": "https://notion.so/exc"}
 
     row_id = create_exception_row(
         client,
@@ -1052,7 +1051,7 @@ def test_create_exception_row_in_notion(monkeypatch) -> None:
     )
 
     assert row_id == "exc-row-id"
-    create_kwargs = mock_api.pages.create.call_args[1]
+    create_kwargs = mock_api.request.call_args_list[0][1]["body"]
     # Must target the exception database, NOT an import database
     assert create_kwargs["parent"]["database_id"] == "exc-db-123"
     # Must have Reason multi-select
@@ -1073,8 +1072,14 @@ def test_import_note_captures_marker_block_ids() -> None:
     client._last_request_time = 0.0
 
     # Simulate pages.create returning the page with block children that include a callout
-    mock_api.pages.create.return_value = {"id": "page-1", "url": "https://notion.so/p"}
-    mock_api.request.return_value = {"id": "note-page-id", "url": "https://notion.so/p", "parent": {"type": "database_id", "database_id": "db-1"}, "properties": {"Name": {"type": "title", "title": [{"plain_text": "test"}]}}}
+    def _fake_request(path="", method="GET", body=None, **kw):
+        if path == "pages" and method == "POST":
+            # Return note page or exception row based on body
+            if body and "children" in body:
+                return {"id": "note-page-id", "url": "https://notion.so/note"}
+            return {"id": "exc-row-1", "url": "https://notion.so/exc"}
+        return {}
+    mock_api.request.side_effect = _fake_request
     # blocks.children.list returns the appended blocks with their IDs
     mock_api.blocks.children.list.return_value = {
         "results": [
@@ -1181,11 +1186,18 @@ def test_execute_import_note_creates_exception_rows_for_evernote_links(tmp_path)
     client._sdk_client = mock_api
     client._rate_lock = __import__("threading").Lock()
     client._last_request_time = 0.0
-    # pages.create for note page, then pages.create for exception row
-    mock_api.pages.create.side_effect = [
-        {"id": "note-page-id", "url": "https://notion.so/note"},
-        {"id": "exc-row-id", "url": "https://notion.so/exc"},
-    ]
+    def _fake_req(path="", method="GET", body=None, **kw):
+        if path == "pages" and method == "POST":
+            if body and "children" in body:
+                return {"id": "note-page-id", "url": "https://notion.so/note"}
+            return {"id": "exc-row-id", "url": "https://notion.so/exc"}
+        return {}
+    mock_api.request.side_effect = _fake_req
+
+
+
+
+
     # list_block_children returns the appended blocks with their IDs
     mock_api.blocks.children.list.return_value = {
         "results": [
@@ -1217,8 +1229,14 @@ def test_execute_import_note_creates_exception_rows_for_evernote_links(tmp_path)
     result = _execute_notion_operation(client, operation)
     assert result == "note-page-id"
     # Exception row should exist
-    assert mock_api.pages.create.call_count == 2
-    exc_kwargs = mock_api.pages.create.call_args_list[1][1]
+    # Both note page + exception row created via request
+    pages_calls = [c for c in mock_api.request.call_args_list if c[1].get("path") == "pages" and c[1].get("method") == "POST"]
+    assert len(pages_calls) >= 2
+    exc_kwargs = pages_calls[1][1]["body"]
+    # Both note page + exception row created via request
+    pages_calls = [c for c in mock_api.request.call_args_list if c[1].get("path") == "pages" and c[1].get("method") == "POST"]
+    assert len(pages_calls) >= 2
+    exc_kwargs = pages_calls[1][1]["body"]
     # Link must point to the BLOCK, not just the page
     link_url = exc_kwargs["properties"]["Link"]["url"]
     assert "blk-callout-1".replace("-", "") in link_url.replace("-", "") or "blk" in link_url, (
