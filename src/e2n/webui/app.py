@@ -1271,7 +1271,9 @@ def create_app() -> FastAPI:
     @app.get("/links/status")
     def links_status():
         """JSON endpoint for link target checking + resolve progress."""
+        loading = _cache.get("notion_exceptions") is None
         return {
+            "loading": loading,
             "checking": _link_targets_checking[0],
             "targets": dict(_link_targets_status),
             "resolving": _resolve_progress["active"],
@@ -1280,8 +1282,6 @@ def create_app() -> FastAPI:
             "resolve_total": _resolve_progress["total"],
             "resolve_message": _resolve_progress["message"],
         }
-
-    @app.post("/links/resolve-all", response_class=HTMLResponse)
 
     @app.post("/links/resolve-all")
     def links_resolve_all(request: Request):
