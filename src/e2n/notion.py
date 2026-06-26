@@ -613,11 +613,7 @@ class NotionClient:
         """Append blocks to a page in Notion-safe batches of ≤100."""
         for i in range(0, len(blocks), 100):
             batch = blocks[i : i + 100]
-            self._sdk_call(
-                self._sdk_client.blocks.children.append,
-                block_id=page_id,
-                children=batch,
-            )
+            self._api(f"blocks/{page_id}/children", "PATCH", {"children": batch})
 
     def import_note_blocks(
         self,
@@ -652,7 +648,6 @@ class NotionClient:
             if "not a property that exists" in str(exc) and IMPORT_TAGS_PROPERTY in str(exc):
                 # Tags property doesn't exist on this database — retry without it
                 properties.pop(IMPORT_TAGS_PROPERTY, None)
-                body["properties"] = properties
                 page = self._sdk_call(self._sdk_client.pages.create, **body)
             else:
                 raise
@@ -667,7 +662,7 @@ class NotionClient:
     def delete_block(self, block_id: str) -> None:
         """Delete a block by ID. Handles already-deleted blocks gracefully."""
         try:
-            self._sdk_call(self._sdk_client.blocks.delete, block_id=block_id)
+            self._api(f"blocks/{block_id}", "DELETE")
         except NotionAPIError:
             pass  # Block already deleted or not found — acceptable
 

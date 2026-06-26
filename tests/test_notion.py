@@ -776,6 +776,8 @@ def test_notion_client_upload_file_returns_upload_id(monkeypatch) -> None:
     client = NotionClient.__new__(NotionClient)
     mock_api = MagicMock()
     client._sdk_client = mock_api
+    client._rate_lock = __import__("threading").Lock()
+    client._last_request_time = 0.0
 
     # Simulate: POST /file_uploads → {id: "upload-123", status: "pending"}
     # POST /file_uploads/upload-123/send → {id: "upload-123", status: "uploaded"}
@@ -804,6 +806,8 @@ def test_batch_append_splits_at_100_blocks() -> None:
     client = NotionClient.__new__(NotionClient)
     mock_api = MagicMock()
     client._sdk_client = mock_api
+    client._rate_lock = __import__("threading").Lock()
+    client._last_request_time = 0.0
     mock_api.blocks.children.append.return_value = {"results": []}
 
     blocks = [paragraph_block([plain_text_span(f"Block {i}")]) for i in range(250)]
@@ -811,11 +815,16 @@ def test_batch_append_splits_at_100_blocks() -> None:
     client.append_blocks_batched("page-abc", blocks)
 
     # Should be 3 calls: 100 + 100 + 50
-    assert mock_api.blocks.children.append.call_count == 3
-    calls = mock_api.blocks.children.append.call_args_list
-    assert len(calls[0][1]["children"]) == 100
-    assert len(calls[1][1]["children"]) == 100
-    assert len(calls[2][1]["children"]) == 50
+    assert mock_api.request.call_count == 3
+    calls = mock_api.request.call_args_list
+    assert len(calls[0][1]["body"]["children"]) == 100
+    assert len(calls[1][1]["body"]["children"]) == 100
+    assert len(calls[2][1]["body"]["children"]) == 50
+
+
+
+
+
 
 
 def test_import_note_creates_page_with_initial_blocks() -> None:
@@ -826,7 +835,10 @@ def test_import_note_creates_page_with_initial_blocks() -> None:
     client = NotionClient.__new__(NotionClient)
     mock_api = MagicMock()
     client._sdk_client = mock_api
+    client._rate_lock = __import__("threading").Lock()
+    client._last_request_time = 0.0
     mock_api.pages.create.return_value = {"id": "new-page-id", "url": "https://notion.so/page"}
+    mock_api.request.return_value = {"id": "page-xyz", "url": "https://notion.so/p", "parent": {"type": "database_id", "database_id": "db-1"}, "properties": {"Name": {"type": "title", "title": [{"plain_text": "test"}]}}}
     mock_api.blocks.children.append.return_value = {"results": []}
 
     blocks = [paragraph_block([plain_text_span(f"Block {i}")]) for i in range(150)]
@@ -837,15 +849,21 @@ def test_import_note_creates_page_with_initial_blocks() -> None:
         tags=("tag1",),
         blocks=blocks,
     )
-
     assert page_id == "new-page-id"
-    # Page creation should include first 100 blocks
+    # Page creation via _sdk_call
     create_call = mock_api.pages.create.call_args
     assert len(create_call[1]["children"]) == 100
-    # Remaining 50 appended separately
-    assert mock_api.blocks.children.append.call_count == 1
-    append_call = mock_api.blocks.children.append.call_args
-    assert len(append_call[1]["children"]) == 50
+    # Overflow appended via _api (request)
+    assert mock_api.request.call_count == 1
+    assert len(mock_api.request.call_args[1]["body"]["children"]) == 50
+
+
+
+
+
+
+
+
 
 
 def test_import_note_with_no_overflow_uses_single_call() -> None:
@@ -856,6 +874,8 @@ def test_import_note_with_no_overflow_uses_single_call() -> None:
     client = NotionClient.__new__(NotionClient)
     mock_api = MagicMock()
     client._sdk_client = mock_api
+    client._rate_lock = __import__("threading").Lock()
+    client._last_request_time = 0.0
     mock_api.pages.create.return_value = {"id": "page-xyz", "url": "https://notion.so/p"}
 
     blocks = [paragraph_block([plain_text_span(f"B{i}")]) for i in range(50)]
@@ -869,8 +889,8 @@ def test_import_note_with_no_overflow_uses_single_call() -> None:
 
     assert page_id == "page-xyz"
     assert len(mock_api.pages.create.call_args[1]["children"]) == 50
-    # No overflow append needed
-    mock_api.blocks.children.append.assert_not_called()
+    # No overflow — request (append) not called
+    mock_api.request.assert_not_called()
 
 
 
@@ -904,7 +924,11 @@ def test_execute_notion_operation_import_note_parses_and_creates_blocks(tmp_path
     client = NotionClient.__new__(NotionClient)
     mock_api = MagicMock()
     client._sdk_client = mock_api
+    client._rate_lock = __import__("threading").Lock()
+    client._last_request_time = 0.0
     mock_api.pages.create.return_value = {"id": "created-page-id", "url": "https://notion.so/p"}
+    mock_api.request.return_value = {"id": "created-page-id", "url": "https://notion.so/p", "parent": {"type": "database_id", "database_id": "db-1"}, "properties": {"Name": {"type": "title", "title": [{"plain_text": "test"}]}}}
+    mock_api.request.return_value = {"id": "created-page-id", "url": "https://notion.so/p", "parent": {"type": "database_id", "database_id": "db-1"}, "properties": {"Name": {"type": "title", "title": [{"plain_text": "test"}]}}}
 
     operation = OperationRecord(
         operation_id=1,
@@ -964,12 +988,15 @@ def test_execute_notion_operation_import_note_uses_resource_manifest(tmp_path) -
     client = NotionClient.__new__(NotionClient)
     mock_api = MagicMock()
     client._sdk_client = mock_api
+    client._rate_lock = __import__("threading").Lock()
+    client._last_request_time = 0.0
     # upload_file mock
     mock_api.request.side_effect = [
         {"id": "upload-img-1", "status": "pending"},
         {"id": "upload-img-1", "status": "uploaded"},
     ]
     mock_api.pages.create.return_value = {"id": "page-with-img", "url": "https://notion.so/p"}
+    mock_api.request.return_value = {"id": "created-page-id", "url": "https://notion.so/p", "parent": {"type": "database_id", "database_id": "db-1"}, "properties": {"Name": {"type": "title", "title": [{"plain_text": "test"}]}}}
 
     operation = OperationRecord(
         operation_id=2,
@@ -1007,7 +1034,10 @@ def test_create_exception_row_in_notion(monkeypatch) -> None:
     client = NotionClient.__new__(NotionClient)
     mock_api = MagicMock()
     client._sdk_client = mock_api
+    client._rate_lock = __import__("threading").Lock()
+    client._last_request_time = 0.0
     mock_api.pages.create.return_value = {"id": "exc-row-id", "url": "https://notion.so/exc"}
+    mock_api.request.return_value = {"id": "page-xyz", "url": "https://notion.so/p", "parent": {"type": "database_id", "database_id": "db-1"}, "properties": {"Name": {"type": "title", "title": [{"plain_text": "test"}]}}}
 
     row_id = create_exception_row(
         client,
@@ -1039,9 +1069,12 @@ def test_import_note_captures_marker_block_ids() -> None:
     client = NotionClient.__new__(NotionClient)
     mock_api = MagicMock()
     client._sdk_client = mock_api
+    client._rate_lock = __import__("threading").Lock()
+    client._last_request_time = 0.0
 
     # Simulate pages.create returning the page with block children that include a callout
     mock_api.pages.create.return_value = {"id": "page-1", "url": "https://notion.so/p"}
+    mock_api.request.return_value = {"id": "note-page-id", "url": "https://notion.so/p", "parent": {"type": "database_id", "database_id": "db-1"}, "properties": {"Name": {"type": "title", "title": [{"plain_text": "test"}]}}}
     # blocks.children.list returns the appended blocks with their IDs
     mock_api.blocks.children.list.return_value = {
         "results": [
@@ -1073,11 +1106,23 @@ def test_delete_block_removes_marker() -> None:
     client = NotionClient.__new__(NotionClient)
     mock_api = MagicMock()
     client._sdk_client = mock_api
-    mock_api.blocks.delete.return_value = {"id": "block-123", "archived": True}
+    client._rate_lock = __import__("threading").Lock()
+    client._last_request_time = 0.0
+    client._rate_lock = __import__("threading").Lock()
+    client._last_request_time = 0.0
+    mock_api.request.return_value = {"id": "block-123", "archived": True}
 
     client.delete_block("block-123")
 
-    mock_api.blocks.delete.assert_called_once_with(block_id="block-123")
+    mock_api.request.assert_called_once_with(path="blocks/block-123", method="DELETE")
+
+
+
+
+
+
+
+
 
 
 def test_delete_block_handles_already_deleted() -> None:
@@ -1086,12 +1131,23 @@ def test_delete_block_handles_already_deleted() -> None:
     from e2n.notion import NotionClient, NotionAPIError
 
     client = NotionClient.__new__(NotionClient)
+    client = NotionClient.__new__(NotionClient)
     mock_api = MagicMock()
     client._sdk_client = mock_api
-    mock_api.blocks.delete.side_effect = Exception("Could not find block")
+    client._rate_lock = __import__("threading").Lock()
+    client._last_request_time = 0.0
+    client._rate_lock = __import__("threading").Lock()
+    client._last_request_time = 0.0
+    mock_api.request.side_effect = Exception("Could not find block")
 
     # Should not raise — graceful handling of already-deleted blocks
     client.delete_block("block-gone")
+
+
+
+
+
+
 
 
 
@@ -1123,6 +1179,8 @@ def test_execute_import_note_creates_exception_rows_for_evernote_links(tmp_path)
     client = NotionClient.__new__(NotionClient)
     mock_api = MagicMock()
     client._sdk_client = mock_api
+    client._rate_lock = __import__("threading").Lock()
+    client._last_request_time = 0.0
     # pages.create for note page, then pages.create for exception row
     mock_api.pages.create.side_effect = [
         {"id": "note-page-id", "url": "https://notion.so/note"},
