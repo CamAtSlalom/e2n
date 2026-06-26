@@ -27,8 +27,6 @@ try:
     from notion_client import Client as _NotionSDKClient
 except ImportError:
     _NotionSDKClient = None  # type: ignore[assignment, misc]
-
-
 @dataclass(frozen=True)
 class RunCard:
     """Dashboard summary for one source processing directory."""
@@ -43,8 +41,6 @@ class RunCard:
     committed_count: int
     pending_count: int
     failed_count: int
-
-
 def create_app() -> FastAPI:
     """Build and return the local web UI application."""
     app = FastAPI(title="e2n Local UI", version="0.1.0")
@@ -1122,7 +1118,7 @@ def create_app() -> FastAPI:
                 }
                 if resolved_url:
                     update_props["Link"] = {"url": resolved_url}
-                client._sdk_call(client._sdk_client.pages.update, page_id=note_id, properties=update_props)
+                client._api(f"pages/{note_id}", "PATCH", {"properties": update_props})
             except Exception:
                 pass
 
@@ -1427,7 +1423,7 @@ def create_app() -> FastAPI:
                 logging.getLogger("e2n.webui").warning("Password page: failed to load exceptions from Notion: %s", exc)
         if not all_exceptions:
             all_exceptions = _load_exceptions_from_processing()
-        encrypted = [e for e in all_exceptions if "Encrypted" in e.get("reasons", "") or "encrypted" in e.get("error_message", "").lower() or "passphrase" in e.get("error_message", "").lower()]
+        encrypted = [e for e in all_exceptions if e.get("status", "Open") != "Resolved" and ("Encrypted" in e.get("reasons", "") or "encrypted" in e.get("error_message", "").lower() or "passphrase" in e.get("error_message", "").lower())]
         return templates.TemplateResponse(
             request=request,
             name="passwords.html",
@@ -1525,8 +1521,6 @@ def create_app() -> FastAPI:
             return templates.TemplateResponse(request=request, name="passwords_result.html", context={"error": "", "decrypted": decrypted_text, "title": title, "note_id": note_id, "passphrase": passphrase})
         except Exception as exc:
             return templates.TemplateResponse(request=request, name="passwords_result.html", context={"error": f"Decryption failed: {exc}", "decrypted": "", "title": note_id})
-
-
     @app.post("/passwords/permanently-decrypt/{note_id}")
     def passwords_permanently_decrypt(request: Request, note_id: str, passphrase: str = Form(...)):
         """Decrypt, replace marker block with plain text, update exception Link, mark Resolved."""
@@ -1590,12 +1584,13 @@ def create_app() -> FastAPI:
             resolved_url = f"https://www.notion.so/{page_id_clean}#{new_block_id}" if new_block_id else f"https://www.notion.so/{page_id_clean}"
         except Exception:
             resolved_url = ""
+
         # Update exception: Status=Resolved, new Link, clear Encrypted Content
         try:
-            update_props: dict = {"Status": {"select": {"name": "Resolved"}}, "Encrypted Content": {"rich_text": []}}
+            update_body: dict = {"properties": {"Status": {"select": {"name": "Resolved"}}, "Encrypted Content": {"rich_text": []}}}
             if resolved_url:
-                update_props["Link"] = {"url": resolved_url}
-            client._sdk_call(client._sdk_client.pages.update, page_id=note_id, properties=update_props)
+                update_body["properties"]["Link"] = {"url": resolved_url}
+            client._api(f"pages/{note_id}", "PATCH", update_body)
         except Exception:
             pass
         _invalidate_exceptions_cache()
@@ -1636,7 +1631,7 @@ def create_app() -> FastAPI:
                 "Encrypted Content": {"rich_text": []},
                 "Link": {"url": None},
             }
-            client._sdk_call(client._sdk_client.pages.update, page_id=note_id, properties=update_props)
+            client._api(f"pages/{note_id}", "PATCH", {"properties": update_props})
         except Exception:
             pass
         _invalidate_exceptions_cache()
@@ -1752,8 +1747,6 @@ def create_app() -> FastAPI:
         return {"status": status, "total_notes": total, "processed": processed, "current": ""}
 
     return app
-
-
 def _build_notion_import_args(
     enex_source: str,
     processing_dir: str,
@@ -1779,8 +1772,6 @@ def _build_notion_import_args(
     args.wipe_local = wipe_local
     args.wipe_remote = wipe_remote
     return args
-
-
 def _collect_run_cards(processing_directory: Path) -> list[RunCard]:
     """Return dashboard cards for each processing child with durable state."""
     if not processing_directory.exists() or not processing_directory.is_dir():
@@ -1829,13 +1820,9 @@ def _collect_run_cards(processing_directory: Path) -> list[RunCard]:
             store.close()
 
     return cards
-
-
 def _redirect_with_message(processing_dir: str, message: str) -> RedirectResponse:
     target = "/?" + urlencode({"processing_dir": processing_dir, "message": message})
     return RedirectResponse(url=target, status_code=303)
-
-
 def _redirect_with_error(processing_dir: str, error: str) -> RedirectResponse:
     target = "/?" + urlencode({"processing_dir": processing_dir, "error": error})
     return RedirectResponse(url=target, status_code=303)
