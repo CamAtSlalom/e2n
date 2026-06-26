@@ -709,17 +709,17 @@ def exception_database_properties() -> JsonObject:
     """Return the schema for the Import-Exceptions database."""
     return {
         "Note Name": {"title": {}},
-        EXCEPTION_KEY_PROPERTY: {"rich_text": {}},
-        EXCEPTION_STATUS_PROPERTY: {"select": {"options": [{"name": "Open"}, {"name": "Resolved"}, {"name": "Closed"}]}},
+        "Linkable Text": {"rich_text": {}},
         "Link": {"url": {}},
+        EXCEPTION_STATUS_PROPERTY: {"select": {"options": [{"name": "Open"}, {"name": "Resolved"}, {"name": "Closed"}]}},
         EXCEPTION_REASON_PROPERTY: {"multi_select": {}},
         "Error Message": {"rich_text": {}},
-        "Source File": {"rich_text": {}},
-        "Linkable Text": {"rich_text": {}},
-        "Evernote Attribute": {"rich_text": {}},
-        "Notion Target": {"rich_text": {}},
         "External Resource": {"rich_text": {}},
         "Encrypted Content": {"rich_text": {}},
+        "Source File": {"rich_text": {}},
+        "Evernote Attribute": {"rich_text": {}},
+        EXCEPTION_KEY_PROPERTY: {"rich_text": {}},
+        "Notion Target": {"rich_text": {}},
     }
 
 
