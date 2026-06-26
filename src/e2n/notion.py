@@ -391,7 +391,7 @@ class NotionClient:
                 from notion_client import Client
             except ImportError as exc:
                 raise NotionAPIError("Install notion-client to use Notion API features") from exc
-            sdk_client = Client(auth=notion_key, notion_version="2022-06-28")
+            sdk_client = Client(auth=notion_key, notion_version="2022-06-28", max_retries=0)
         self._sdk_client = sdk_client
         self._notion_key = notion_key
         self._rate_lock = __import__("threading").Lock()
@@ -685,8 +685,8 @@ class NotionClient:
         if lock:
             with lock:
                 elapsed = time.time() - self._last_request_time
-                if elapsed < 0.35:
-                    time.sleep(0.35 - elapsed)
+                if elapsed < 0.5:
+                    time.sleep(0.5 - elapsed)
                 self._last_request_time = time.time()
         # Retry on rate limit (429)
         for attempt in range(3):
@@ -694,7 +694,7 @@ class NotionClient:
                 return sdk_method(**kwargs)
             except Exception as exc:
                 if "rate" in str(exc).lower() or "429" in str(exc):
-                    time.sleep(1.0 * (attempt + 1))
+                    time.sleep(5.0 * (attempt + 1))  # 5s, 10s, 15s backoff
                     continue
                 raise NotionAPIError(f"Notion SDK request failed: {exc}") from exc
         raise NotionAPIError("Notion API rate limited after 3 retries")
