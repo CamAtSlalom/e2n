@@ -582,9 +582,15 @@ def create_app() -> FastAPI:
 
     # Cached exceptions from Notion (invalidated on resolution actions)
     _cache: dict[str, list[dict] | None] = {"notion_exceptions": None, "exc_db_id": None, "import_db_ids": None}
+    # Link target resolution state: {name: "pending"|"exists"|"missing"}
+    _link_targets_status: dict[str, str] = {}
+    _link_targets_checking = [False]
 
     def _invalidate_exceptions_cache():
         _cache["notion_exceptions"] = None
+        _cache["exc_db_id"] = None
+        _cache["import_db_ids"] = None
+        _link_targets_status.clear()
 
     def _get_import_db_ids(client: NotionClient, notion_key: str) -> set[str]:
         """Get the set of import database IDs (under 'Evernote Import' page)."""
@@ -1127,9 +1133,10 @@ def create_app() -> FastAPI:
 
     # --- Evernote Link Management (first-class feature) ---
 
+
     @app.get("/links/", response_class=HTMLResponse)
     def links_home(request: Request):
-        """Show unique link targets split by whether the target page exists in imports."""
+        """Show unique link targets — renders immediately, target existence checked in background."""
         exceptions = _load_exceptions_from_notion() or _load_exceptions_from_processing()
         link_exceptions = [e for e in exceptions if "Evernote Link" in e["reasons"]]
         # Group by link_text (the target page name), track source pages
@@ -1144,39 +1151,77 @@ def create_app() -> FastAPI:
                 if src_title and src_title not in targets[lt]["sources"]:
                     targets[lt]["sources"].append(src_title)
 
-        # Check which targets exist in import databases
-        notion_key = _wizard_state.get("notion_key", "") or os.environ.get("NOTION_KEY", "") or os.environ.get("NOTION_TOKEN", "")
-        exists_set: set[str] = set()
-        if notion_key and targets:
-            try:
-                client = NotionClient(notion_key)
-                import_dbs = _get_import_db_ids(client, notion_key)
-                for name in targets:
-                    found = client.search_pages(name)
-                    if any(getattr(p, "parent_database_id", "") in import_dbs for p in found):
-                        exists_set.add(name)
-            except Exception:
-                pass
+        # Use cached status for split; kick off background check for unknowns
+        exists_targets = []
+        missing_targets = []
+        pending_targets = []
+        for name, info in targets.items():
+            status = _link_targets_status.get(name, "pending")
+            if status == "exists":
+                exists_targets.append((name, info))
+            elif status == "missing":
+                missing_targets.append((name, info))
+            else:
+                pending_targets.append((name, info))
 
-        # Split into exists / not-exists, each sorted by count desc then alpha
-        exists_targets = sorted(
-            [(n, info) for n, info in targets.items() if n in exists_set],
-            key=lambda x: (-x[1]["count"], x[0]),
-        )
-        missing_targets = sorted(
-            [(n, info) for n, info in targets.items() if n not in exists_set],
-            key=lambda x: (-x[1]["count"], x[0]),
-        )
+        # Sort each group
+        exists_targets.sort(key=lambda x: (-x[1]["count"], x[0]))
+        missing_targets.sort(key=lambda x: (-x[1]["count"], x[0]))
+        pending_targets.sort(key=lambda x: (x[1]["count"], x[0]))  # check simple (low-count) first
+
+        # Kick off background target checking if needed
+        if pending_targets and not _link_targets_checking[0]:
+            import threading
+            names_to_check = [name for name, _ in pending_targets]
+            for n in names_to_check:
+                _link_targets_status[n] = "pending"
+            t = threading.Thread(target=_check_link_targets_background, args=(names_to_check,), daemon=True)
+            t.start()
+
         return templates.TemplateResponse(
             request=request,
             name="links.html",
             context={
                 "exists_targets": exists_targets,
                 "missing_targets": missing_targets,
+                "pending_targets": pending_targets,
                 "total_links": len(link_exceptions),
                 "total_targets": len(targets),
+                "checking": bool(pending_targets) or _link_targets_checking[0],
             },
         )
+
+    def _check_link_targets_background(names: list[str]):
+        """Background thread: check each link target against import databases."""
+        _link_targets_checking[0] = True
+        notion_key = _wizard_state.get("notion_key", "") or os.environ.get("NOTION_KEY", "") or os.environ.get("NOTION_TOKEN", "")
+        if not notion_key:
+            _link_targets_checking[0] = False
+            return
+        try:
+            client = NotionClient(notion_key)
+            import_dbs = _get_import_db_ids(client, notion_key)
+            for name in names:
+                try:
+                    found = client.search_pages(name)
+                    if any(getattr(p, "parent_database_id", "") in import_dbs for p in found):
+                        _link_targets_status[name] = "exists"
+                    else:
+                        _link_targets_status[name] = "missing"
+                except Exception:
+                    _link_targets_status[name] = "missing"
+        except Exception:
+            pass
+        finally:
+            _link_targets_checking[0] = False
+
+    @app.get("/links/status")
+    def links_status():
+        """JSON endpoint for progressive link target checking status."""
+        return {
+            "checking": _link_targets_checking[0],
+            "targets": dict(_link_targets_status),
+        }
 
     @app.post("/links/resolve-all", response_class=HTMLResponse)
     def links_resolve_all(request: Request):
