@@ -8,6 +8,9 @@
   <button type="submit">&#x21bb; Refresh</button>
 </form>
 <p>{{ total }} exception(s) to resolve.</p>
+{% if loading %}
+<p style="color:#888; font-style:italic;">⏳ Loading exceptions from Notion...</p>
+{% endif %}
 
 {% if total > 0 %}
 <h2>Actions</h2>
@@ -36,5 +39,8 @@
 {% endfor %}
 </ul>
 <p><a href="/">← Home</a></p>
+{% if loading %}
+<script>setTimeout(function(){ window.location.reload(); }, 5000);</script>
+{% endif %}
 </body>
 </html>
