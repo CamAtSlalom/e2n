@@ -1163,7 +1163,7 @@ def create_app() -> FastAPI:
     @app.get("/links/", response_class=HTMLResponse)
     def links_home(request: Request):
         """Show unique link targets — renders immediately, target existence checked in background."""
-        exceptions = _cache.get("notion_exceptions") or _load_exceptions_from_processing()
+        exceptions = _cache.get("notion_exceptions") or []
         # If Notion cache is empty, kick off background fetch
         if _cache.get("notion_exceptions") is None:
             import threading
