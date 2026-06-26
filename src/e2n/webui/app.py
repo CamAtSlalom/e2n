@@ -1360,7 +1360,7 @@ def create_app() -> FastAPI:
                         continue
                     target_url = target_matches[0].url or f"https://www.notion.so/{target_matches[0].page_id.replace('-', '')}"
 
-                with ThreadPoolExecutor(max_workers=4) as pool:
+                with ThreadPoolExecutor(max_workers=2) as pool:
                     for result in pool.map(lambda exc: _resolve_one(exc, target_url, page_name), refs):
                         if result == "resolved":
                             _resolve_progress["resolved"] += 1
@@ -1454,7 +1454,7 @@ def create_app() -> FastAPI:
                 except Exception:
                     return "failed"
 
-            with ThreadPoolExecutor(max_workers=4) as pool:
+            with ThreadPoolExecutor(max_workers=2) as pool:
                 for result in pool.map(_resolve_one, referencing):
                     if result == "resolved":
                         _resolve_progress["resolved"] += 1
