@@ -1303,6 +1303,23 @@ def create_app() -> FastAPI:
                     bid = block_url.split("#")[-1]
                     block_id = f"{bid[:8]}-{bid[8:12]}-{bid[12:16]}-{bid[16:20]}-{bid[20:]}" if len(bid) == 32 else bid
                 if not block_id:
+                    # No callout — append link to end of source page
+                    page_url_raw = block_url.split("#")[0] if block_url else ""
+                    pid_raw = page_url_raw.split("/")[-1][:32] if page_url_raw else ""
+                    if pid_raw and len(pid_raw) == 32:
+                        src_pid = f"{pid_raw[:8]}-{pid_raw[8:12]}-{pid_raw[12:16]}-{pid_raw[16:20]}-{pid_raw[20:]}"
+                        try:
+                            seg = target_url.rstrip("/").split("/")[-1].split("?")[0].split("#")[0]
+                            cand = seg[-32:] if len(seg) >= 32 else seg
+                            t_pid = f"{cand[:8]}-{cand[8:12]}-{cand[12:16]}-{cand[16:20]}-{cand[20:]}" if len(cand) == 32 and all(c in "0123456789abcdef" for c in cand) else ""
+                            blk = {"paragraph": {"rich_text": [{"type": "mention", "mention": {"type": "page", "page": {"id": t_pid}}}]}} if t_pid else {"paragraph": {"rich_text": [{"type": "text", "text": {"content": pname, "link": {"url": target_url}}}]}}
+                            client._api(f"blocks/{src_pid}/children", "PATCH", {"children": [blk]})
+                            if exc_row_id:
+                                import httpx
+                                httpx.patch(f"https://api.notion.com/v1/pages/{exc_row_id}", headers={"Authorization": f"Bearer {notion_key}", "Notion-Version": "2022-06-28", "Content-Type": "application/json"}, json={"properties": {"Status": {"select": {"name": "Resolved"}}, "Linkable Text": {"rich_text": [{"text": {"content": pname}}]}}})
+                            return "resolved"
+                        except Exception:
+                            return "failed"
                     return "failed"
                 try:
                     client.update_block_with_page_link(block_id, pname, target_url)
@@ -1385,8 +1402,32 @@ def create_app() -> FastAPI:
                 if "#" in block_url:
                     bid = block_url.split("#")[-1]
                     block_id = f"{bid[:8]}-{bid[8:12]}-{bid[12:16]}-{bid[16:20]}-{bid[20:]}" if len(bid) == 32 else bid
+
                 if not block_id:
-                    return "failed"
+                    # No callout marker — append link to end of source page
+                    page_url_raw = block_url.split("#")[0] if block_url else ""
+                    page_id_raw = page_url_raw.split("/")[-1][:32] if page_url_raw else ""
+                    if page_id_raw and len(page_id_raw) == 32:
+                        source_page_id = f"{page_id_raw[:8]}-{page_id_raw[8:12]}-{page_id_raw[12:16]}-{page_id_raw[16:20]}-{page_id_raw[20:]}"
+                        try:
+                            seg = target_url.rstrip("/").split("/")[-1].split("?")[0].split("#")[0]
+                            cand = seg[-32:] if len(seg) >= 32 else seg
+                            t_page_id = f"{cand[:8]}-{cand[8:12]}-{cand[12:16]}-{cand[16:20]}-{cand[20:]}" if len(cand) == 32 and all(c in "0123456789abcdef" for c in cand) else ""
+                            if t_page_id:
+                                new_block = {"paragraph": {"rich_text": [{"type": "mention", "mention": {"type": "page", "page": {"id": t_page_id}}}]}}
+                            else:
+                                new_block = {"paragraph": {"rich_text": [{"type": "text", "text": {"content": search_name, "link": {"url": target_url}}}]}}
+                            client._api(f"blocks/{source_page_id}/children", "PATCH", {"children": [new_block]})
+                            # Mark resolved
+                            if exc_row_id:
+                                import httpx
+                                httpx.patch(f"https://api.notion.com/v1/pages/{exc_row_id}", headers={"Authorization": f"Bearer {notion_key}", "Notion-Version": "2022-06-28", "Content-Type": "application/json"}, json={"properties": {"Status": {"select": {"name": "Resolved"}}, "Linkable Text": {"rich_text": [{"text": {"content": search_name}}]}}})
+                            return "resolved"
+                        except Exception:
+                            return "failed"
+                    else:
+                        return "failed"
+
                 try:
                     client.update_block_with_page_link(block_id, search_name, target_url)
                     if exc_row_id:
