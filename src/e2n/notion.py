@@ -445,7 +445,7 @@ class NotionClient:
             "parent": {"type": "page_id", "page_id": parent_page_id},
             "properties": {"title": [{"text": {"content": title}}]},
         }
-        return _page_ref(self._sdk_call(self._sdk_client.pages.create, **body))
+        return _page_ref(self._api("pages", "POST", body))
 
     def create_workspace_page(self, title: str) -> NotionPageRef:
         """Create a top-level workspace page when the integration type allows it."""
