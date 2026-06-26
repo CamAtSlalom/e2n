@@ -588,12 +588,24 @@ def create_app() -> FastAPI:
     # Cached page_id/URL for link targets: {name: {"page_id": ..., "url": ...}}
     _link_target_pages: dict[str, dict] = {}
 
+
     def _invalidate_exceptions_cache():
+        """Clear exception data cache (keeps link target status for fast reload)."""
         _cache["notion_exceptions"] = None
         _cache["exc_db_id"] = None
         _cache["import_db_ids"] = None
+
+    def _invalidate_all_caches():
+        """Full cache reset including link target status (used by Refresh button)."""
+        _invalidate_exceptions_cache()
         _link_targets_status.clear()
         _link_target_pages.clear()
+
+
+
+
+
+
 
     def _get_import_db_ids(client: NotionClient, notion_key: str) -> set[str]:
         """Get the set of import database IDs (under 'Evernote Import' page)."""
@@ -671,7 +683,7 @@ def create_app() -> FastAPI:
     @app.post("/refresh")
     def refresh_page(request: Request, redirect: str = Form("/")):
         """Invalidate exceptions cache and redirect back to the calling page."""
-        _invalidate_exceptions_cache()
+        _invalidate_all_caches()
         return RedirectResponse(url=redirect, status_code=303)
 
     @app.get("/resolve/", response_class=HTMLResponse)
