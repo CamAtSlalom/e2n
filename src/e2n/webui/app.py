@@ -539,6 +539,14 @@ def create_app() -> FastAPI:
                 total_imported += imported
                 total_exceptions += exc_count
 
+
+        # Override counts from Notion if available (more accurate post-import)
+        notion_exceptions = _load_exceptions_from_notion()
+        if notion_exceptions:
+            total_exceptions = len(notion_exceptions)
+            total_link_exceptions = sum(1 for e in notion_exceptions if "Evernote Link" in e.get("reasons", ""))
+            total_encrypted = sum(1 for e in notion_exceptions if "Encrypted" in e.get("reasons", ""))
+
         return templates.TemplateResponse(
             request=request,
             name="wizard_step5.html",
@@ -550,6 +558,7 @@ def create_app() -> FastAPI:
                 "total_encrypted": total_encrypted,
             },
         )
+
 
     # --- Resolution Workbench routes ---
 
