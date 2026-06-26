@@ -660,9 +660,9 @@ def create_app() -> FastAPI:
         notion_root = _wizard_state.get("notion_root", "") or os.environ.get("NOTION_ROOT", "")
         try:
             br = bootstrap_notion_pages(notion_key, root_title=notion_root if notion_root else None)
-            # Search for databases under the converted (import) page
-            all_dbs = client.search_databases()
-            import_dbs = {db.database_id for db in all_dbs if db.parent_page_id == br.converted.page_id}
+            # List children of the import page to find databases
+            children = client.list_block_children(br.converted.page_id)
+            import_dbs = {c["id"] for c in children if c.get("type") == "child_database"}
             _cache["import_db_ids"] = list(import_dbs)
             return import_dbs
         except Exception:
