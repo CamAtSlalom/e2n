@@ -473,7 +473,7 @@ class NotionClient:
                 IMPORT_TAGS_PROPERTY: import_tags_property(tags),
             },
         }
-        return _page_ref(self._sdk_call(self._sdk_client.pages.create, **body))
+        return _page_ref(self._api("pages", "POST", body))
 
     def create_database_page(self, database_id: str, properties: JsonObject) -> NotionPageRef:
         """Create one database row page with custom properties."""
