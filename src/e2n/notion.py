@@ -598,14 +598,15 @@ class NotionClient:
         create_response = self._api("file_uploads", "POST", {})
         upload_id = create_response["id"]
 
-        # Step 2: Send file contents via form_data
         file_data = local_path.read_bytes()
+        # Step 2: Send file contents via multipart form (bypass _api — needs form_data)
         self._sdk_call(
             self._sdk_client.request,
             path=f"file_uploads/{upload_id}/send",
             method="POST",
             form_data={"file": (local_path.name, file_data, content_type)},
         )
+        return upload_id
         return upload_id
 
     def append_blocks_batched(self, page_id: str, blocks: list[JsonObject]) -> None:
