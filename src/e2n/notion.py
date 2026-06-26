@@ -489,7 +489,7 @@ class NotionClient:
 
     def retrieve_page_raw(self, page_id: str) -> JsonObject:
         """Retrieve raw page payload including properties."""
-        return self._sdk_call(self._sdk_client.pages.retrieve, page_id=page_id)
+        return self._api(f"pages/{page_id}", "GET")
 
     def list_block_children(self, block_id: str) -> list[JsonObject]:
         """List first-level child blocks for one block/page id."""
