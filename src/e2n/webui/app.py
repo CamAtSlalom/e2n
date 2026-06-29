@@ -404,7 +404,6 @@ def create_app() -> FastAPI:
                                             upload_id = client.upload_file(local_path, mime_type=seg.mime_type)
                                             note_resource_map[seg.value] = f"upload:{upload_id}"
                                         except Exception as upload_err:
-                                        except Exception as upload_err:
                                             log.warning("Upload failed for %s: %s", local_path.name, upload_err)
                                             # Track as resource exception with local file path
                                             note_resource_map[seg.value] = f"local:{local_path}"
@@ -703,13 +702,6 @@ def create_app() -> FastAPI:
                 ".drawio": "application/xml", ".ics": "text/calendar",
             }
             content_type = ext_map.get(local_path.suffix.lower(), "application/octet-stream")
-                "sources": sources_summary,
-                "total_imported": total_imported,
-                "total_exceptions": total_exceptions,
-                "total_link_exceptions": total_link_exceptions,
-                "total_encrypted": total_encrypted,
-            },
-        )
 
 
     # --- Resolution Workbench routes ---
@@ -770,19 +762,32 @@ def create_app() -> FastAPI:
 
 
 
+
     def _get_import_db_ids(client: NotionClient, notion_key: str) -> set[str]:
-        """Get the set of import database IDs (under 'Evernote Import' page)."""
+        """Get the set of import database IDs (under 'Evernote Import' page, possibly nested)."""
         if _cache.get("import_db_ids") is not None:
             return set(_cache["import_db_ids"])
         notion_root = _wizard_state.get("notion_root", "") or os.environ.get("NOTION_ROOT", "")
         try:
             br = bootstrap_notion_pages(notion_key, root_title=notion_root if notion_root else None)
-            # List children of the import page to find databases
             children = client.list_block_children(br.converted.page_id)
-            import_dbs = {c["id"] for c in children if c.get("type") == "child_database"}
+            child_types = [c.get("type") for c in children]
+            logging.getLogger("e2n.webui").info("Import page children: %d items, types: %s", len(children), child_types)
+            import_dbs: set[str] = set()
+            for c in children:
+                if c.get("type") == "child_database":
+                    import_dbs.add(c["id"])
+                elif c.get("type") == "child_page":
+                    # Databases may be nested inside child pages
+                    sub_children = client.list_block_children(c["id"])
+                    for sc in sub_children:
+                        if sc.get("type") == "child_database":
+                            import_dbs.add(sc["id"])
+            logging.getLogger("e2n.webui").info("Found %d import database(s)", len(import_dbs))
             _cache["import_db_ids"] = list(import_dbs)
             return import_dbs
-        except Exception:
+        except Exception as exc:
+            logging.getLogger("e2n.webui").warning("_get_import_db_ids failed: %s", exc)
             return set()
 
     def _load_exceptions_from_notion() -> list[dict]:
